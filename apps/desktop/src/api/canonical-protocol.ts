@@ -592,8 +592,16 @@ export class CanonicalDesktopProtocol {
 
   // An exact-retry mutation receipt replays its ORIGINAL revision; never move the CAS value backwards.
   private adoptRevision(params: Record<string, unknown>, value: any, mutation: boolean): void {
-    if (typeof value.session_id !== 'string' || typeof value.revision !== 'number') { return }
+    if (typeof value.session_id !== 'string' || (mutation && value.session_id !== params.session_id)) { return }
     const owner = canonicalSessionKey(value.session_id, params.profile)
+
+    // The ACK can precede session.updated (or be the only frame after reconnect).
+    // Exact retries return the original generation, so never rewind the fence.
+    if (typeof value.execution_generation === 'number') {
+      this.generations.set(owner, Math.max(this.generations.get(owner) ?? -1, value.execution_generation))
+    }
+
+    if (typeof value.revision !== 'number') { return }
 
     if (!mutation || value.revision >= (this.revisions.get(owner) ?? -1)) { this.revisions.set(owner, value.revision) }
   }

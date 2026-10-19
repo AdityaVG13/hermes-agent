@@ -24,6 +24,7 @@ class ConfigContext:
     user_providers: dict
     custom_providers: list
     excluded_providers: list = None
+    config: dict | None = None
 
     def with_overrides(
         self, *, current_provider: Optional[str] = None, current_model: Optional[str] = None,
@@ -37,12 +38,12 @@ class ConfigContext:
         return replace(self, **kw) if kw else self
 
 
-def load_picker_context() -> ConfigContext:
+def load_picker_context(config: dict | None = None) -> ConfigContext:
     """Load the disk-config snapshot every consumer needs."""
     from hermes_cli.config import (
         coerce_provider_id, get_compatible_custom_providers, load_config, stringify_provider_map,
     )
-    cfg = load_config()
+    cfg = load_config() if config is None else config
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         # YAML parses unquoted scalars as int (`provider: 2070`); keep strings so picker/options
@@ -58,6 +59,7 @@ def load_picker_context() -> ConfigContext:
         user_providers=stringify_provider_map(cfg.get("providers")),
         custom_providers=get_compatible_custom_providers(cfg),
         excluded_providers=excluded if isinstance(excluded, list) else [],
+        config=cfg,
     )
 
 
@@ -149,8 +151,8 @@ def build_models_payload(
     # Both metadata decorators consult ``model_overrides``.  Snapshot the
     # read-only config once for this payload rather than letting each model
     # lookup reopen config.yaml through models_dev._cfg_get().
-    metadata_config = None
-    if capabilities or featured:
+    metadata_config = ctx.config
+    if metadata_config is None and (capabilities or featured):
         try:
             from hermes_cli.config import load_config_readonly
 
@@ -543,6 +545,7 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
     is deliberately NOT forwarded — it under-reports levels that work."""
     from agent.codex_service_tiers import ultrafast_offered
     from hermes_cli.models import model_supports_ultrafast, resolve_fast_mode_overrides
+    from hermes_cli.route_identity import model_route_capabilities
 
     try:
         from agent.models_dev import get_model_capabilities
@@ -566,6 +569,7 @@ def _apply_capabilities(rows: list[dict], *, metadata_config: dict | None = None
             fast = resolve_fast_mode_overrides(
                 model, provider=slug, base_url=row.get("api_url")) is not None
             entry: dict[str, Any] = {"fast": fast, "reasoning": reasoning}
+            entry.update(model_route_capabilities(slug, model, config=metadata_config, base_url=row.get('api_url')))
             if fast and model_supports_ultrafast(model) and ultrafast_offered(
                     model, provider=slug, base_url=row.get("api_url")):
                 entry["ultrafast"] = True

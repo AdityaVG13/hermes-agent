@@ -15,6 +15,22 @@ def transport():
 
 class TestMetaRetention:
 
+    @pytest.mark.parametrize("provider,model,expected", [
+        ("muse-code", "muse-spark-1.3", "max"),
+        ("muse-code", "muse-spark-1.3-contributor", "max"),
+        ("meta-ai", "muse-spark-1.3-contributor", "xhigh"),
+        ("meta-ai", "muse-spark-1.3", "max"),
+        ("muse-code", "muse-wonder-1.0", "max"),
+        ("muse-code", "muse-spark-1.2", "xhigh"),
+    ])
+    def test_meta_max_is_route_specific(self, transport, provider, model, expected):
+        kw = transport.build_kwargs(
+            model=model, messages=[{"role": "user", "content": "Hi"}], tools=[],
+            provider=provider, base_url="https://api.meta.ai/v1",
+            reasoning_config={"effort": "max", "enabled": True},
+        )
+        assert kw["reasoning"]["effort"] == expected
+
     def test_meta_retention_also_for_generic_model_name(self, transport):
         for model in ["muse-spark", "meta/muse-spark-1.2-2026-04-01", "gpt-5.4", ""]:
             kw = transport.build_kwargs(

@@ -1,4 +1,4 @@
-import { DEFAULT_REASONING_EFFORT, isReasoningEffort, type ReasoningEffort } from '@hermes/shared'
+import { DEFAULT_REASONING_EFFORT, isReasoningEffort, REASONING_EFFORTS, type ReasoningEffort } from '@hermes/shared'
 
 import { normalize } from '@/lib/text'
 
@@ -13,6 +13,13 @@ const SHORT_LABELS: Record<string, string> = {
   xhigh: 'XHigh',
   max: 'Max',
   ultra: 'Ultra'
+}
+
+/** The Model API excludes Contributor Max; Muse Code explicitly includes it. */
+export function modelReasoningEfforts(provider: string, model: string) {
+  return provider === 'meta-ai' && model === 'muse-spark-1.3-contributor'
+    ? REASONING_EFFORTS.filter(effort => effort !== 'max' && effort !== 'ultra')
+    : REASONING_EFFORTS
 }
 
 /**

@@ -177,7 +177,11 @@ def _credential_pool_is_usable(provider: str, *, raw_pool_present: bool = False,
         from agent.credential_pool import load_pool
         pool = load_pool(provider)
         if pool.has_credentials():
-            return for_picker or pool.has_available()
+            # Env-backed slots survive removing their secret. A remembered row
+            # alone must not make an unconnected provider look authenticated.
+            if for_picker:
+                return any(entry.runtime_api_key or entry.refresh_token for entry in pool.entries())
+            return pool.has_available()
     except Exception:
         pass
     return raw_pool_present

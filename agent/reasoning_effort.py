@@ -89,6 +89,19 @@ OLLAMA_CLOUD_OVERRIDES: dict[str, str] = {"xhigh": "max"}
 #: Meta Model API (Muse): rejects ``none``.
 META_AI_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
 
+
+def meta_supported_efforts(model: Optional[str], *, provider: Optional[str] = None) -> tuple[str, ...]:
+    """Muse Code includes Contributor Max; the pay-per-token API does not.
+
+    https://dev.meta.ai/docs/muse-code/configuration (subscription), versus
+    https://dev.meta.ai/docs/reasoning (Model API). Unknown/older models keep the safe ladder.
+    """
+    slug = str(model or "").strip().lower().rsplit("/", 1)[-1]
+    supports_max = slug in {"muse-spark-1.3", "muse-wonder-1.0"} or (
+        (provider or "").strip().lower() == "muse-code" and slug == "muse-spark-1.3-contributor"
+    )
+    return (*META_AI_EFFORTS, "max") if supports_max else META_AI_EFFORTS
+
 #: Gemini 4 (``gemini-4-argon``) ``thinkingLevel``: thinking cannot be disabled, ``minimal`` and
 #: ``thinkingBudget`` 400 (live on Vertex global, 2026-10-13).
 GEMINI4_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high")
@@ -165,9 +178,17 @@ def route_supported_efforts(
     downstream, never upward). On the Codex app-server runtime ``ultra`` is codex's own harness mode,
     accepted wherever the model's ladder reaches ``max`` (codex runs it at ``max``; a model without
     ``max`` rejects it), so it is sent verbatim there."""
+    if (provider or "").strip().lower() in {"meta-ai", "muse-code"}:
+        return meta_supported_efforts(model, provider=provider)
     if (provider or "").strip().lower() == "openai-codex":
         supported = codex_supported_efforts(model)
         return (*supported, "ultra") if api_mode == "codex_app_server" and "max" in supported else supported
+    from providers import get_provider_profile
+    profile = get_provider_profile(provider or "")
+    if profile is not None:
+        supported = profile.supported_reasoning_efforts(model or "")
+        if supported is not None:
+            return tuple(supported)
     return OPENAI_COMPAT_WIRE_EFFORTS
 
 

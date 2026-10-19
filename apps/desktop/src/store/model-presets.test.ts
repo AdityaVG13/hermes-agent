@@ -10,6 +10,8 @@ import {
   setCurrentServiceTier
 } from './session'
 
+const scope = { connectionId: 'local', profile: 'default', routeId: 'fixture-route' }
+
 describe('model presets', () => {
   beforeEach(() => {
     $modelPresets.set({})
@@ -19,10 +21,10 @@ describe('model presets', () => {
   })
 
   it('round-trips a preset and merges patches without dropping prior fields', () => {
-    setModelPreset('anthropic', 'claude-opus-4-8', { effort: 'high' })
-    setModelPreset('anthropic', 'claude-opus-4-8', { fast: true })
+    setModelPreset('anthropic', 'claude-opus-4-8', { effort: 'high' }, scope)
+    setModelPreset('anthropic', 'claude-opus-4-8', { fast: true }, scope)
 
-    expect(getModelPreset('anthropic', 'claude-opus-4-8')).toEqual({
+    expect(getModelPreset('anthropic', 'claude-opus-4-8', scope)).toEqual({
       effort: 'high',
       fast: true,
       serviceTier: 'priority'
@@ -42,8 +44,8 @@ describe('model presets', () => {
       return {} as T
     }
 
-    setModelPreset('openai-codex', 'gpt-6-astra', { serviceTier: 'ultrafast', effort: 'ultra' })
-    await applyModelPreset(getModelPreset('openai-codex', 'gpt-6-astra'), {
+    setModelPreset('openai-codex', 'gpt-6-astra', { serviceTier: 'ultrafast', effort: 'ultra' }, scope)
+    await applyModelPreset(getModelPreset('openai-codex', 'gpt-6-astra', scope), {
       failMessage: 'failed',
       request,
       sessionId: 'session-a'
@@ -53,8 +55,8 @@ describe('model presets', () => {
       method: 'config.set',
       params: { key: 'fast', session_id: 'session-a', value: 'ultrafast' }
     })
-    setModelPreset('openai-codex', 'gpt-6-astra', { fast: true })
-    expect(getModelPreset('openai-codex', 'gpt-6-astra')).toEqual({
+    setModelPreset('openai-codex', 'gpt-6-astra', { fast: true }, scope)
+    expect(getModelPreset('openai-codex', 'gpt-6-astra', scope)).toEqual({
       effort: 'ultra',
       fast: true,
       serviceTier: 'priority'

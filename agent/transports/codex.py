@@ -311,7 +311,12 @@ def _resolve_reasoning(model: str, params: dict[str, Any]) -> tuple[Any, bool]:
     # supported level, never escalate, never invert the ladder) replaces the per-backend hand maps that
     # repeatedly leaked internal levels like "ultra" to the wire (#89503 class) or clamped one rung below a
     # model's real ceiling (#87279).
-    if params.get("is_xai_responses", False):
+    from utils import base_url_host_matches
+
+    if base_url_host_matches(str(params.get("base_url") or ""), "api.meta.ai"):
+        from agent.reasoning_effort import meta_supported_efforts
+        supported = meta_supported_efforts(model, provider=params.get("provider"))
+    elif params.get("is_xai_responses", False):
         from agent.model_metadata import is_grok_46_family
 
         # Grok 4.6 accepts xhigh; older Grok tops out at high.

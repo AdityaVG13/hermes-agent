@@ -386,9 +386,10 @@ def _reasoning_fields(agent, policy, model, authority=None, override=None):
     if isinstance(config, dict):
         effort = 'none' if config.get('enabled') is False else str(config.get('effort') or '')
     wire = ''
-    if effort and effort != 'none':
-        wire = str(clamp_effort(effort, route_supported_efforts(
-            provider, model, getattr(view, 'api_mode', None))) or '')
+    if effort:
+        supported = route_supported_efforts(provider, model, getattr(view, 'api_mode', None))
+        if effort != 'none' or 'none' not in supported:
+            wire = str(clamp_effort(effort, supported) or '')
     try:
         fast = tier in STATIC_TIERS and resolve_fast_mode_overrides(
             model, provider=provider or None, base_url=base_url or None, tier=tier) is not None

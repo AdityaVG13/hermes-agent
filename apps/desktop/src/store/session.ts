@@ -1697,6 +1697,14 @@ export const getCurrentModelSource = (): ComposerModelSource => {
   return source === 'default' || source === 'manual' ? source : ''
 }
 
+/** The user's durable route, not the transient paint of a resumed session. */
+export function getComposerModelSelection(): { model: string; provider: string } {
+  return {
+    model: storedComposerString(COMPOSER_MODEL_KEY) ?? '',
+    provider: storedComposerString(COMPOSER_PROVIDER_KEY) ?? ''
+  }
+}
+
 // Reactive mirror of the persisted source so UI (the composer pill's
 // override badge) can subscribe. The getter above stays storage-backed —
 // it's read cross-window, where this atom wouldn't see writes.

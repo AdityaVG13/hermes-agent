@@ -14,6 +14,11 @@ class _FakePool:
     def __init__(self, available: bool):
         self._available = available
 
+    def entries(self):
+        from agent.credential_pool import PooledCredential
+
+        return [PooledCredential.from_dict("opencode-go", {"access_token": "test-token"})]
+
     def has_credentials(self) -> bool:
         # The pool still holds entries...
         return True

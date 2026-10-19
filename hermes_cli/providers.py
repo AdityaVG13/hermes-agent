@@ -179,11 +179,13 @@ def is_actual_route(provider: str = "", base_url: str = "") -> bool:
     )
 
 
-def _models_dev_info(canonical: str, allow_network: bool = True):
+def _models_dev_info(canonical: str, allow_network: bool = True, *, config: dict | None = None):
     """models.dev entry or None. Single-arg call on the default path: test sites monkeypatch
     ``get_provider_info`` with single-arg lambdas."""
     try:
         from agent.models_dev import get_provider_info as _mdev_provider
+        if config is not None:
+            return _mdev_provider(canonical, allow_network=allow_network, config=config)
         return _mdev_provider(canonical) if allow_network else _mdev_provider(canonical, allow_network=False)
     except Exception:
         return None
@@ -195,11 +197,11 @@ def _overlay_pdef(canonical, ov: HermesOverlay, name, env_vars, base_url, doc, s
                        source=source)
 
 
-def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderDef]:
+def get_provider(name: str, *, allow_network: bool = True, config: dict | None = None) -> Optional[ProviderDef]:
     """Look up a built-in provider by id or alias: models.dev catalog merged with the Hermes overlay;
     Hermes-only overlay (nous, openai-codex, …); plugin provider profiles with a concrete endpoint."""
     canonical = normalize_provider(name)
-    mdev_info = _models_dev_info(canonical, allow_network)
+    mdev_info = _models_dev_info(canonical, allow_network, config=config)
     overlay = HERMES_OVERLAYS.get(canonical)
     if mdev_info is not None:
         ov = overlay or HermesOverlay()

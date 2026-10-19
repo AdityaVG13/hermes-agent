@@ -26,6 +26,7 @@ afterEach(() => {
 function renderSubmenu(opts: {
   defaultEffort?: string
   effort?: string
+  effortMap?: Record<string, string>
   fastControl: FastControl
   isActive?: boolean
   onSelectModel?: (model: string) => void
@@ -40,6 +41,7 @@ function renderSubmenu(opts: {
           <ModelEditSubmenu
             defaultEffort={opts.defaultEffort ?? 'medium'}
             effort={opts.effort ?? 'medium'}
+            effortMap={opts.effortMap}
             fastControl={opts.fastControl}
             isActive={opts.isActive ?? true}
             model="m1"
@@ -60,6 +62,26 @@ function renderSubmenu(opts: {
 // ever writes directly again, picking an effort for a kanban card would reach
 // over and change the user's live chat.
 describe('ModelEditSubmenu reports edits without performing them', () => {
+  it('labels every level using this route mapping, without borrowing a same-name model mapping', () => {
+    const onSetOptions = vi.fn()
+    renderSubmenu({
+      fastControl: { kind: 'none' },
+      onSetOptions,
+      reasoning: true,
+      effortMap: { max: 'xhigh', ultra: 'xhigh' }
+    })
+    expect(screen.getByRole('menuitemradio', { name: /Max.*Extra High/ })).toBeTruthy()
+    cleanup()
+    renderSubmenu({
+      fastControl: { kind: 'none' },
+      onSetOptions,
+      reasoning: true,
+      effortMap: { max: 'max', ultra: 'max' }
+    })
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /^Max$/ }))
+    expect(onSetOptions).toHaveBeenCalledWith({ effort: 'max' })
+  })
+
   it('param fast: reports the toggle', () => {
     const onSetOptions = vi.fn()
     renderSubmenu({ fastControl: { kind: 'param', on: true }, onSetOptions, reasoning: false })

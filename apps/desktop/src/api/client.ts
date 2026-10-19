@@ -383,7 +383,36 @@ export class HermesGateway extends JsonRpcGatewayClient {
     return params
   }
 
+  private modelEdits = new Map<string, Promise<unknown>>()
+
   override async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
+    if (!this.canonical || method !== 'config.set' || !params.session_id || params.scope === 'global' ||
+        !['model', 'reasoning', 'fast'].includes(String(params.key))) {
+      return this.requestOwner<T>(method, params, timeoutMs, signal)
+    }
+
+    const routed = this.routeCanonicalParams(method, params)
+    const owner = canonicalSessionKey(routed.session_id, routed.profile)
+    const generation = this.connectionGeneration
+    const deadline = Date.now() + (timeoutMs ?? DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS)
+    const previous = this.modelEdits.get(owner) ?? Promise.resolve()
+
+    const edit = previous.catch(() => undefined).then(() => {
+      this.requireConnectionGeneration(generation)
+
+      return this.requestOwner<T>(method, routed, remainingRequestBudget(deadline, signal), signal)
+    })
+
+    this.modelEdits.set(owner, edit)
+
+    try {
+      return await edit
+    } finally {
+      if (this.modelEdits.get(owner) === edit) { this.modelEdits.delete(owner) }
+    }
+  }
+
+  private async requestOwner<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal, retryGeneration = true): Promise<T> {
     if (!this.canonical) { return super.request<T>(method, legacyParams(method, params), timeoutMs, signal) }
     const generation = this.connectionGeneration
     const deadline = requestDeadline(timeoutMs)
@@ -454,6 +483,25 @@ export class HermesGateway extends JsonRpcGatewayClient {
       return settled
     } catch (error) {
       this.protocol.failure(prepared, error)
+
+      // A turn may advance the execution identity without editing policy. A
+      // typed refusal wrote nothing: refresh once, but never overwrite a real
+      // concurrent policy edit (revision changed), or retry an ambiguous send.
+      if (retryGeneration && wireMethod === 'session.mutate' &&
+          ['model', 'reasoning'].includes(String(prepared.operation)) &&
+          (error as { data?: { reason?: string } })?.data?.reason === 'stale_generation') {
+        const snapshot = await this.request<{ revision?: number }>('session.resume', {
+          session_id: prepared.session_id, omit_messages: true, defer_history: true,
+          ...(prepared.profile !== undefined ? { profile: prepared.profile } : {})
+        }, remainingRequestBudget(deadline, signal), signal)
+
+        this.requireConnectionGeneration(generation)
+
+        if (snapshot.revision === prepared.expected_revision) {
+          return this.requestOwner<T>(method, params, remainingRequestBudget(deadline, signal), signal, false)
+        }
+      }
+
       throw error
     }
   }

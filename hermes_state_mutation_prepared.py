@@ -51,7 +51,15 @@ def model_in_transaction(db, conn, session_id, payload, prepared):
     # is a client/provider boundary, not an implicit reload of launch defaults.
     row = conn.execute('SELECT model_config FROM sessions WHERE id=?', (target,)).fetchone()
     model_config = json.loads(row[0] or '{}')
-    model_config['provider'] = config['provider']
+    model_config.update(model=model, provider=config['provider'])
+    # Resume reads gateway_runtime before the top-level selection. An explicit
+    # model receipt replaces that route, including an absent endpoint/protocol.
+    model_config.pop('gateway_runtime', None)
+    for key in ('base_url', 'api_mode'):
+        if config.get(key):
+            model_config[key] = config[key]
+        else:
+            model_config.pop(key, None)
     conn.execute('UPDATE sessions SET model=?,model_config=? WHERE id=?', (model, _json(model_config), target))
     # This selection is newer than any pick still waiting for a turn boundary: that pick is superseded.
     conn.execute('DELETE FROM state_meta WHERE key=?', (DEFERRED_PICK_PREFIX + session_id,))

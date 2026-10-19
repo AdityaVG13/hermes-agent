@@ -6,6 +6,41 @@ from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 
+def model_route_capabilities(provider: str, model: str, *, config: dict | None = None,
+                             base_url: str | None = None, api_mode: str | None = None) -> dict:
+    """Opaque picker binding; offline and secret-free on the wire. Unknown routes have no token.
+
+    This identifies a credential SOURCE (profile/provider/key pointer), not whichever rotating
+    OAuth account is selected for a request. Runtime client caches additionally bind its token.
+    """
+    import hashlib
+    import json
+    from agent.reasoning_effort import EFFORT_LADDER, clamp_effort, route_supported_efforts
+    from hermes_constants import get_hermes_home
+    from hermes_cli.config import load_config_readonly
+    from hermes_cli.providers import custom_provider_slug, get_provider, normalize_provider
+    from hermes_cli.runtime_provider import _get_named_custom_provider
+
+    cfg = load_config_readonly() if config is None else config
+    entry = _get_named_custom_provider(provider, config=cfg, resolve_credentials=False)
+    canonical = (custom_provider_slug(entry.get('name', ''), entry.get('provider_key', ''))
+                 if entry else normalize_provider(provider))
+    selected = cfg.get('model')
+    selected = selected if isinstance(selected, dict) else {}
+    if normalize_provider(selected.get('provider') or '') != normalize_provider(provider):
+        selected = {}
+    pdef = get_provider(canonical, allow_network=False, config=cfg) if not entry else None
+    endpoint = base_url or (entry or {}).get('base_url') or selected.get('base_url') or (pdef.base_url if pdef else '')
+    mode = api_mode or (entry or {}).get('api_mode') or selected.get('api_mode') or (pdef.transport if pdef else 'chat_completions')
+    binding = [str(get_hermes_home().resolve()), canonical, normalize_route_base_url(endpoint), mode, model,
+               entry or {}, {key: selected[key] for key in ('key_env', 'api_key_env', 'api_key', 'api_key_from') if key in selected},
+               cfg.get('nous') if canonical == 'nous' else None]
+    route_id = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest() if endpoint else ''
+    supported = route_supported_efforts(canonical, model, mode)
+    return {'route_id': route_id,
+            'effort_map': {effort: clamp_effort(effort, supported) for effort in EFFORT_LADDER}}
+
+
 def normalize_route_base_url(base_url: Any) -> str:
     """Canonicalize only proven-equivalent endpoint URL components."""
     raw = str(base_url or "")

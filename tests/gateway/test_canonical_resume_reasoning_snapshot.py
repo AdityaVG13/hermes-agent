@@ -4,13 +4,20 @@ Desktop marks a resumed slice's effort pending and clears it only on a string
 ``info.reasoning_effort`` (main's session info always carried it with
 ``reasoning_effort_wire`` / ``service_tier`` / ``fast``); a lazy canonical session must report the
 level its frozen policy will run, or the pill spins forever."""
-from types import SimpleNamespace
+import socket
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 
 @pytest.mark.asyncio
 async def test_lazy_session_info_reports_frozen_reasoning_and_tier(tmp_path, monkeypatch):
+    # This unit test dispatches directly; entry-point dependency activation must
+    # not inspect the live installation or switch interpreters under pytest.
+    bootstrap = ModuleType('hermes_bootstrap')
+    monkeypatch.setattr(bootstrap, '_happy_eyeballs_create_connection', socket.create_connection, raising=False)
+    monkeypatch.setitem(sys.modules, 'hermes_bootstrap', bootstrap)
     from gateway import run
     from gateway.config import GatewayConfig
     from gateway.session import SessionStore
@@ -46,3 +53,14 @@ async def test_lazy_session_info_reports_frozen_reasoning_and_tier(tmp_path, mon
         assert (info['service_tier'], info['fast']) == ('priority', False), info
     off = await call('session.create', request_id='off', source='gui', cwd=str(tmp_path), reasoning='none')
     assert (off['info']['reasoning_effort'], off['info']['reasoning_effort_wire']) == ('none', '')
+
+
+def test_lazy_snapshot_reports_provider_reasoning_floor(monkeypatch):
+    from gateway.session_local import _reasoning_fields
+
+    monkeypatch.setattr('providers.get_provider_profile', lambda provider: SimpleNamespace(
+        supported_reasoning_efforts=lambda model: ('low', 'medium', 'high', 'xhigh')))
+    policy = SimpleNamespace(effective=lambda *args, **kwargs: (
+        {'model': {'provider': 'registry-provider'}, 'agent': {}}, 'model'))
+    info = _reasoning_fields(None, policy, 'model', override={'enabled': False})
+    assert (info['reasoning_effort'], info['reasoning_effort_wire']) == ('none', 'low')

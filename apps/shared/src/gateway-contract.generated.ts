@@ -816,6 +816,8 @@ export interface ModelCapabilities {
   ultrafast?: boolean
   reasoning: boolean
   can_disable_reasoning?: boolean | null
+  route_id?: string | null
+  effort_map?: Record<string, string> | null
 }
 /** ``hermes_cli/inventory.py::_apply_pricing`` — formatted $/Mtok strings (``""`` unknown, ``"free"``); the sale fields are Nous Portal-only. */
 export interface ModelPricing {

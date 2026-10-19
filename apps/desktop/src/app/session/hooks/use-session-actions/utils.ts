@@ -35,10 +35,8 @@ import {
   setCurrentBranch,
   setCurrentCwdTransient,
   setCurrentFastMode,
-  setCurrentModel,
   setCurrentModelTransient,
   setCurrentPersonality,
-  setCurrentProvider,
   setCurrentProviderTransient,
   setCurrentReasoningEffort,
   setCurrentReasoningEffortWire,
@@ -2376,11 +2374,11 @@ interface ApplyRuntimeInfoOptions {
  *  renders from. Foreground sessions only — see ApplyRuntimeInfoOptions. */
 function publishRuntimeToComposer(state: SessionRuntimeStatePatch): void {
   if (state.model !== undefined) {
-    setCurrentModel(state.model)
+    setCurrentModelTransient(state.model)
   }
 
   if (state.provider !== undefined) {
-    setCurrentProvider(state.provider)
+    setCurrentProviderTransient(state.provider)
   }
 
   if (state.cwd !== undefined) {

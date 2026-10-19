@@ -43,6 +43,7 @@ import { dropStatusDrawersForProfile, migrateStatusDrawersForProfile } from './c
 import { registryConnectionKind } from './connection-registry-state'
 import { recordDislike } from './desktop-metrics'
 import { dialedGatewayModeFor } from './gateway'
+import { dropModelPresetsForProfile } from './model-presets'
 import {
   adoptPendingRuntimeTabs,
   dropPreviewTabsForProfile,
@@ -2763,6 +2764,7 @@ export function dropTilesForProfile(
   // connection scope so deletion cannot erase same-named local tabs instead.
   const ambientConnection = tileConnectionId || LOCAL_CONNECTION_ID
   const removedScope = backendScopeKey(route ? routeConnection : ambientConnection, routeProfile || name)
+  dropModelPresetsForProfile(routeProfile || name, route ? routeConnection : ambientConnection)
 
   const ownerMatches = (owner: SessionProfileRoute | undefined): boolean => {
     if (!owner) {
@@ -2898,6 +2900,8 @@ export function migrateTilesForProfile(oldProfile: string, newProfile: string): 
   migrateSessionOwnerHintsForProfile(from, to)
   migratePreviewArtifactsForProfile(from, to)
   migrateStatusDrawersForProfile(from, to)
+  // Route tokens bind the old home; a rename must re-resolve, not transplant them.
+  dropModelPresetsForProfile(from)
   // Sibling family: the rail's profile-keyed buckets move with the rename, or
   // the renamed profile opens with an empty rail and the old name keeps them.
   migratePreviewTabsForProfile(from, to)

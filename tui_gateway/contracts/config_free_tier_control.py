@@ -469,6 +469,8 @@ class ModelCapabilities(Result):
     ultrafast: bool = False
     reasoning: bool
     can_disable_reasoning: bool | None = None
+    route_id: str | None = None
+    effort_map: dict[str, str] | None = None
 
 
 class ProviderLimit(Result):

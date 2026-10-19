@@ -120,9 +120,17 @@ def test_never_blocks_execution():
 
 
 def _fake_agent(stall_guards=True):
-    from types import SimpleNamespace
+    import socket
+    import sys
+    from types import ModuleType, SimpleNamespace
+    from unittest.mock import patch
 
-    from run_agent import AIAgent
+    # These exercise the guardrail methods, not entry-point environment setup.
+    # Preserve the real-home tripwire and avoid bootstrapping the live install.
+    bootstrap = ModuleType('hermes_bootstrap')
+    bootstrap._happy_eyeballs_create_connection = socket.create_connection
+    with patch.dict(sys.modules, {'hermes_bootstrap': bootstrap}):
+        from run_agent import AIAgent
 
     agent = SimpleNamespace(
         _tool_guardrails=ToolCallGuardrailController(),

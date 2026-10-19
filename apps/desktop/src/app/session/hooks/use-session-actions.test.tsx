@@ -124,6 +124,7 @@ import {
   transcriptRowContentKey
 } from './use-session-actions/transcript-provenance'
 import type { TranscriptViewCutoff } from './use-session-actions/transcript-provenance'
+import { applyRuntimeInfo } from './use-session-actions/utils'
 import { useSessionStateCache } from './use-session-state-cache'
 
 vi.mock('@/hermes', async importOriginal => ({
@@ -1535,6 +1536,19 @@ describe('createBackendSessionForSend profile routing', () => {
 
     expect(params).not.toHaveProperty('model')
     expect(params).not.toHaveProperty('provider')
+  })
+
+  it('does not combine a resumed runtime provider with the manually selected Muse model', async () => {
+    const params = await createWith(() => {
+      setCurrentModel('muse-spark-1.3-contributor')
+      setCurrentProvider('muse-code')
+      setCurrentModelSource('manual')
+      // A foreground runtime snapshot can be partial. It is not a user pick,
+      // and must not persist half of another session's route over the draft.
+      applyRuntimeInfo({ provider: 'openai-codex' })
+    })
+
+    expect(params).toMatchObject({ model: 'muse-spark-1.3-contributor', provider: 'muse-code' })
   })
 
   it('still sends an explicit manual pick as a per-session override', async () => {

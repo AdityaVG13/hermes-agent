@@ -208,6 +208,10 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
             config[key] = value
         else:
             config.pop(key, None)
+    # The live selection above owns this snapshot. Resume prefers the messaging
+    # gateway's nested route, so retaining it can send the new model to the old
+    # provider even though the composer and top-level fields show the new pick.
+    config.pop("gateway_runtime", None)
     return config
 
 

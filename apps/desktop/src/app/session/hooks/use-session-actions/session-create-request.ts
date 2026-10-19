@@ -11,10 +11,9 @@ import {
 import {
   $currentCwdExplicit,
   $currentFastMode,
-  $currentModel,
-  $currentProvider,
   $currentReasoningEffort,
   $currentServiceTier,
+  getComposerModelSelection,
   getCurrentModelSource
 } from '@/store/session'
 import type { SessionCreateResponse } from '@/types/hermes'
@@ -107,13 +106,14 @@ export async function desktopSessionCreateParams(
   // Shipping that stale value as an override pins every new chat to the old
   // model. Omit model/provider unless the source is 'manual'.
   const isManualSelection = getCurrentModelSource() === 'manual'
+  const modelSelection = getComposerModelSelection()
 
   const selection = {
     effort: $currentReasoningEffort.get().trim(),
     fast: $currentFastMode.get(),
     serviceTier: $currentServiceTier.get().trim(),
-    model: isManualSelection ? $currentModel.get().trim() : '',
-    provider: isManualSelection ? $currentProvider.get().trim() : ''
+    model: isManualSelection ? modelSelection.model.trim() : '',
+    provider: isManualSelection ? modelSelection.provider.trim() : ''
   }
 
   const profile =

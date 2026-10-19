@@ -3,6 +3,13 @@ effort pickers and ``/reasoning`` status must say what the route really sends.""
 from agent.reasoning_effort import effort_display_label
 
 
+def test_provider_declared_registry_efforts_are_used_for_display(monkeypatch):
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(supported_reasoning_efforts=lambda model: ("low", "medium", "high", "xhigh"))
+    monkeypatch.setattr("providers.get_provider_profile", lambda provider: profile)
+    assert effort_display_label("max", "registry-provider", "model") == "max (sends xhigh on this route)"
+    assert effort_display_label("none", "registry-provider", "model") == "none (sends low on this route)"
 
 
 def test_supported_level_label_is_the_level_itself():

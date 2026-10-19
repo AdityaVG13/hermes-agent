@@ -214,7 +214,8 @@ async def model_options(connection, ref, params):
         from gateway.run import _profile_runtime_scope
         from hermes_cli.inventory import load_picker_context, build_model_options_payload
         with _profile_runtime_scope(Path(connection.authority.profile_id)):
-            ctx = load_picker_context()
+            # The same policy snapshot supplies inventory and the next model mutation.
+            ctx = load_picker_context(policy.config(connection.authority) if policy else None)
             selected = provider
             if selected == 'custom':
                 from hermes_cli.runtime_provider import canonical_custom_identity

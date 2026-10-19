@@ -337,6 +337,22 @@ class ToolCallGuardrailController:
         self._turn_web_search_count = 0
         self._turn_subagent_count = 0
 
+    def reset_for_context_boundary(self) -> None:
+        """Forget result references the rewritten context may no longer contain.
+
+        This is not a new turn: retain failed-call counts and per-turn caps.
+        """
+        self._no_progress.clear()
+        self._identical_streak_sig = None
+        self._identical_streak_result_hash = ""
+        self._identical_streak_count = 0
+        self._identical_streak_first_call_id = ""
+        self._call_history.clear()
+        if self._halt_decision is not None and self._halt_decision.code in {
+            "idempotent_no_progress_block", "identical_call_streak_halt", "identical_cycle_halt",
+        }:
+            self._halt_decision = None
+
     @property
     def halt_decision(self) -> ToolGuardrailDecision | None:
         return self._halt_decision

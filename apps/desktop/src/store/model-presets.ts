@@ -18,9 +18,7 @@ const STORAGE_KEY = 'hermes.desktop.model-presets'
 const pendingWrites = new Map<string, Promise<unknown>>()
 const confirmedValues = new Map<string, string>()
 
-/** Per-model reasoning/fast preset, remembered globally across sessions and
- *  re-applied to the session whenever that model is selected. Unset dimensions
- *  fall back to the Hermes default (medium effort, no fast). */
+/** Remember options only within the route that gave them meaning. */
 export interface ModelPreset {
   effort?: string
   fast?: boolean
@@ -32,8 +30,17 @@ export const modelPresetServiceTier = ({ fast, serviceTier }: ModelPreset): stri
 
 type RequestGateway = <T>(method: string, params?: Record<string, unknown>) => Promise<T>
 
-/** Stable `provider::model` key (matches the visibility-store format). */
-export const modelPresetKey = (provider: string, model: string): string => `${provider}::${model}`
+export interface ModelPresetScope {
+  connectionId: string
+  profile: string
+  /** Opaque owner-issued endpoint/protocol/credential-scope identity. Never a secret. */
+  routeId: string
+}
+
+export const modelPresetKey = (provider: string, model: string, scope?: ModelPresetScope): string =>
+  scope?.connectionId && scope.profile && scope.routeId
+    ? JSON.stringify(['route-v2', scope.connectionId, scope.profile, scope.routeId, provider, model])
+    : ''
 
 function load(): Record<string, ModelPreset> {
   const raw = storedString(STORAGE_KEY)
@@ -53,13 +60,44 @@ function load(): Record<string, ModelPreset> {
 
 export const $modelPresets = atom<Record<string, ModelPreset>>(load())
 
-export function getModelPreset(provider: string, model: string): ModelPreset {
-  return $modelPresets.get()[modelPresetKey(provider, model)] ?? {}
+/** A profile-home change invalidates the owner's opaque route tokens. */
+export function dropModelPresetsForProfile(profile: string, connectionId = 'local'): void {
+  const entries = Object.entries($modelPresets.get())
+
+  const kept = entries.filter(([key]) => {
+    try {
+      const binding = JSON.parse(key)
+
+      return (
+        !Array.isArray(binding) || binding[0] !== 'route-v2' || binding[1] !== connectionId || binding[2] !== profile
+      )
+    } catch {
+      return true
+    }
+  })
+
+  if (kept.length !== entries.length) {
+    const next = Object.fromEntries(kept)
+    $modelPresets.set(next)
+    persistString(STORAGE_KEY, JSON.stringify(next))
+  }
+}
+
+export function getModelPreset(provider: string, model: string, scope?: ModelPresetScope): ModelPreset {
+  const key = modelPresetKey(provider, model, scope)
+
+  return key ? ($modelPresets.get()[key] ?? {}) : {}
 }
 
 /** Merge a partial preset for one model and persist. */
-export function setModelPreset(provider: string, model: string, patch: ModelPreset): void {
-  const key = modelPresetKey(provider, model)
+export function setModelPreset(provider: string, model: string, patch: ModelPreset, scope?: ModelPresetScope): void {
+  const key = modelPresetKey(provider, model, scope)
+
+  // A legacy provider::model preference has no provable owner. Do not migrate or borrow it.
+  if (!key) {
+    return
+  }
+
   const tier = modelPresetServiceTier(patch)
 
   const next = {

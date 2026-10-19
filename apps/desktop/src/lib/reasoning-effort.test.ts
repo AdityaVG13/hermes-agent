@@ -3,12 +3,19 @@ import { describe, expect, it } from 'vitest'
 
 import {
   isThinkingEnabled,
+  modelReasoningEfforts,
   reasoningEffortClamp,
   reasoningEffortLabel,
   resolveReasoningEffort
 } from './reasoning-effort'
 
 describe('reasoning-effort', () => {
+  it('keeps Muse Code Contributor Max separate from the pay-per-token API limits', () => {
+    expect(modelReasoningEfforts('muse-code', 'muse-spark-1.3-contributor')).toContain('max')
+    expect(modelReasoningEfforts('meta-ai', 'muse-spark-1.3-contributor')).not.toContain('ultra')
+    expect(modelReasoningEfforts('muse-code', 'muse-spark-1.3')).toContain('max')
+    expect(modelReasoningEfforts('custom:relay', 'muse-spark-1.3-contributor')).toContain('max')
+  })
   it('labels every level it claims to support', () => {
     for (const effort of REASONING_EFFORT_VALUES) {
       expect(reasoningEffortLabel(effort)).not.toBe('')

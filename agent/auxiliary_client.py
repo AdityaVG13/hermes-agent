@@ -4881,6 +4881,7 @@ class _ResolveRequest(NamedTuple):
     main_runtime: Optional[dict[str, Any]]
     is_vision: bool
     task: Optional[str]
+    named_entry: Optional[dict[str, Any]] = None
 
 
 _ResolveResult = tuple[Optional[Any], Optional[str]]
@@ -5159,8 +5160,8 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
     # If the raw name is an alias (``kimi`` → ``kimi-coding``) and a custom_providers entry exists
     # under it, the custom entry wins over alias rewriting. Only for aliases, so entries matching a
     # canonical name (e.g. ``nous``) still defer to the built-in.
-    custom_entry = None
-    if req.original_provider and req.original_provider != provider:
+    custom_entry = req.named_entry
+    if custom_entry is None and req.original_provider and req.original_provider != provider:
         custom_entry = _get_named_custom_provider(req.original_provider)
     if custom_entry is None:
         custom_entry = _get_named_custom_provider(provider)
@@ -5416,6 +5417,7 @@ def resolve_provider_client(
     explicit_base_url: str | None = None, explicit_api_key: Optional[str | Callable[[], str]] = None,
     api_mode: str | None = None, main_runtime: Optional[dict[str, Any]] = None, is_vision: bool = False,
     task: Optional[str] = None,
+    _named_entry: Optional[dict[str, Any]] = None,
 ) -> tuple[Optional[Any], Optional[str]]:
     """Central router: return a configured client (auth, base URL, API format) for a provider + optional model.
     The client always exposes ``.chat.completions.create()``; Codex/Responses providers get an adapter.
@@ -5479,7 +5481,7 @@ def resolve_provider_client(
         model = _get_aux_model_for_provider(provider) or _read_main_model_for_aux() or model
     req = _ResolveRequest(
         provider, original_provider, model, async_mode, raw_codex,
-        explicit_base_url, explicit_api_key, api_mode, main_runtime, is_vision, task,
+        explicit_base_url, explicit_api_key, api_mode, main_runtime, is_vision, task, _named_entry,
     )
     branch = _EXPLICIT_PROVIDER_BRANCHES.get(provider)
     alias_identity = original_provider.removeprefix("custom:")
@@ -5784,7 +5786,11 @@ def _client_cache_key(
     api_key: Optional[str] = None, api_mode: Optional[str] = None,
     main_runtime: Optional[dict[str, Any]] = None, is_vision: bool = False,
     task: Optional[str] = None, model: Optional[str] = None,
+    named_binding: Optional[tuple] = None,
 ) -> tuple:
+    from agent.auxiliary_route_cache import named_binding_cache_key, named_route_binding
+    if named_binding is None:
+        named_binding = named_route_binding(provider, base_url, api_key)
     runtime = _normalize_main_runtime(main_runtime)
     # `auto` resolves through the main runtime and task-specific policy, so both join the key.
     runtime_key = tuple(_runtime_cache_discriminator(f, runtime.get(f, "")) for f in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
@@ -5797,7 +5803,7 @@ def _client_cache_key(
     # Profile home leads the key: callers that omit api_key (pool / Nous auth.json paths) would
     # otherwise share one client across multiplex profiles holding different credentials.
     return (hermes_home_key(), provider, async_mode, base_url or "", api_key_key, api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key,
-            _borrowed_main_credential_key(provider, base_url, api_key, runtime))
+            _borrowed_main_credential_key(provider, base_url, api_key, runtime), named_binding_cache_key(named_binding))
 
 
 def _borrowed_main_credential_key(provider: str, base_url: Optional[str], api_key: Any, runtime: dict[str, Any]) -> tuple:
@@ -6027,9 +6033,11 @@ def _get_cached_client(
         base_url, api_key = local
     current_loop = _current_event_loop() if async_mode else None
     runtime = _normalize_main_runtime(main_runtime)
+    from agent.auxiliary_route_cache import named_route_binding
+    named_binding = named_route_binding(provider, base_url, api_key)
     cache_key = _client_cache_key(
         provider, async_mode=async_mode, base_url=base_url, api_key=api_key, api_mode=api_mode,
-        main_runtime=main_runtime, is_vision=is_vision, task=task, model=model,
+        main_runtime=main_runtime, is_vision=is_vision, task=task, model=model, named_binding=named_binding,
     )
     with _client_cache_lock:
         if cache_key in _client_cache:
@@ -6046,7 +6054,7 @@ def _get_cached_client(
     # Build outside the lock. For pool-backed providers derive the key from the pool entry:
     # resolve_api_key_provider_credentials prefers env vars, which would bypass pool rotation
     # and retry an exhausted key. A pinned ``custom:<name>`` peeks only its entry's rows.
-    effective_api_key = api_key
+    effective_api_key = named_binding[1] if named_binding is not None else api_key
     if not effective_api_key:
         _pool = pool_for_aux_provider(provider, _normalize_aux_provider(provider), lambda k: _load_pool_with_credentials(k, " (peek)"))
         if _pool is not None and (_pe := _peek_pool_entry(provider, _pool)) is not None:
@@ -6054,6 +6062,7 @@ def _get_cached_client(
     client, default_model = resolve_provider_client(
         provider, model, async_mode, explicit_base_url=base_url, explicit_api_key=effective_api_key,
         api_mode=api_mode, main_runtime=runtime, is_vision=is_vision, task=task,
+        **({'_named_entry': named_binding[0]} if named_binding is not None else {}),
     )
     if client is not None and _aux_probe_active():
         # Availability probes answer "resolvable?" and must leave the cache untouched: the

@@ -1166,6 +1166,7 @@ function ModelFamilyRow({
         canDisableReasoning={caps?.can_disable_reasoning ?? undefined}
         defaultEffort={defaultEffort}
         effort={effEffort}
+        effortMap={caps?.effort_map}
         effortWire={isCurrent ? current.effortWire : undefined}
         fastControl={fastControl}
         isActive={isCurrent}

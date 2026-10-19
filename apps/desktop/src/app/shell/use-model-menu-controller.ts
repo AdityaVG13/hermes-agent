@@ -7,7 +7,12 @@ import { useRef } from 'react'
 import { useSessionView } from '@/app/chat/session-view'
 import type { HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { modelOptionsQueryKey, requestModelOptions } from '@/lib/model-options'
+import {
+  currentModelCapabilities,
+  findCatalogProvider,
+  modelOptionsQueryKey,
+  requestModelOptions
+} from '@/lib/model-options'
 import { currentPickerSelection } from '@/lib/model-status-label'
 import {
   $modelPresets,
@@ -15,6 +20,7 @@ import {
   getModelPreset,
   type ModelPreset,
   modelPresetKey,
+  type ModelPresetScope,
   modelPresetServiceTier,
   setModelPreset
 } from '@/store/model-presets'
@@ -50,7 +56,7 @@ export interface ModelMenuHostProps {
 
 /**
  * The controller that gives a model-menu edit its meaning on a chat surface —
- * write through to THIS surface's session, remember the pick as a global
+ * write through to THIS surface's session, remember the pick within its route,
  * preset, keep the optimistic stores honest, and roll back on a failed gateway
  * write. Shared by the composer's model menu and its reasoning menu so both
  * pills edit the same session through one code path.
@@ -95,11 +101,27 @@ export function useModelMenuController({
     modelOptions.data
   )
 
-  const hostScope = `${ownerConnectionId ?? ''}::${profile}`
+  const presetScope = (provider: string, model: string): ModelPresetScope | undefined => {
+    const routeId = currentModelCapabilities(modelOptions.data, provider, model)?.route_id
+
+    return ownerConnectionId && routeId ? { connectionId: ownerConnectionId, profile, routeId } : undefined
+  }
+
+  const presetProvider = (provider: string): string => {
+    const row = findCatalogProvider(modelOptions.data?.providers ?? [], provider)
+
+    return row?.aliases?.find(alias => alias.startsWith('custom:')) ?? row?.slug ?? provider
+  }
+
+  const hostScope = JSON.stringify([ownerConnectionId ?? '', profile])
   const latestHostScope = useRef(hostScope)
   latestHostScope.current = hostScope
 
   const patchPreset = (patch: ModelPreset, row: { model: string; provider: string }, failMessage: string) => {
+    const scope = presetScope(row.provider, row.model)
+    const provider = presetProvider(row.provider)
+    const bindingKey = modelPresetKey(provider, row.model, scope) || JSON.stringify([hostScope, provider, row.model])
+
     const dimensions = [
       ...(patch.effort !== undefined ? ['effort' as const] : []),
       ...(modelPresetServiceTier(patch) !== undefined ? ['speed' as const] : [])
@@ -108,13 +130,13 @@ export function useModelMenuController({
     const stamps = new Map(
       dimensions.map(dimension => {
         const ownerKey = `${hostScope}::${activeSessionId ?? 'draft'}::${dimension}`
-        const presetKey = `${modelPresetKey(row.provider, row.model)}::${dimension}`
+        const presetKey = `${bindingKey}::${dimension}`
 
         return [dimension, { ownerKey, presetKey, owner: nextEdit(ownerKey), preset: nextEdit(presetKey) }]
       })
     )
 
-    setModelPreset(row.provider, row.model, patch)
+    setModelPreset(provider, row.model, patch, scope)
 
     if (touchesPrimary) {
       markComposerSelectionManual()
@@ -144,15 +166,20 @@ export function useModelMenuController({
           return
         }
 
-        const current = getModelPreset(row.provider, row.model)
+        const current = getModelPreset(provider, row.model, scope)
 
         if (dimension === 'effort' && current.effort === patch.effort) {
-          setModelPreset(row.provider, row.model, { effort: confirmed.effort })
+          setModelPreset(provider, row.model, { effort: confirmed.effort }, scope)
         } else if (dimension === 'speed' && modelPresetServiceTier(current) === modelPresetServiceTier(patch)) {
-          setModelPreset(row.provider, row.model, {
-            fast: confirmed.fast ?? false,
-            serviceTier: modelPresetServiceTier(confirmed) ?? 'normal'
-          })
+          setModelPreset(
+            provider,
+            row.model,
+            {
+              fast: confirmed.fast ?? false,
+              serviceTier: modelPresetServiceTier(confirmed) ?? 'normal'
+            },
+            scope
+          )
         }
       }
     }).finally(() => {
@@ -185,7 +212,8 @@ export function useModelMenuController({
       provider: optionsProvider
     },
 
-    presetFor: (provider, model) => modelPresets[modelPresetKey(provider, model)] ?? {},
+    presetFor: (provider, model) =>
+      modelPresets[modelPresetKey(presetProvider(provider), model, presetScope(provider, model))] ?? {},
 
     // The composer picker never persists the profile default. With a session it
     // scopes the switch to that session; with none it's UI state shipped on the
@@ -196,20 +224,22 @@ export function useModelMenuController({
     },
 
     setOptions: (patch, row) => {
-      // Editing always records the model's global preset (keyed by
-      // provider::model, not per-surface — a tile edit re-applies to that model
-      // everywhere); the active model also gets it pushed onto its OWN session.
+      // A preference belongs to this owner's resolved route, not every model
+      // with the same name. The active model also writes to its OWN session.
       // Non-active edits stay preset-only — no model switch, no session write.
       if (!row.isActive) {
-        setModelPreset(row.provider, row.model, patch)
+        const scope = presetScope(row.provider, row.model)
+        const provider = presetProvider(row.provider)
+        const key = modelPresetKey(provider, row.model, scope)
+        setModelPreset(provider, row.model, patch, scope)
 
-        // Invalidate a pending rollback for the same globally remembered dimension.
+        // Invalidate only this route's pending rollback.
         if (patch.effort !== undefined) {
-          nextEdit(`${modelPresetKey(row.provider, row.model)}::effort`)
+          nextEdit(`${key}::effort`)
         }
 
         if (modelPresetServiceTier(patch) !== undefined) {
-          nextEdit(`${modelPresetKey(row.provider, row.model)}::speed`)
+          nextEdit(`${key}::speed`)
         }
 
         return
