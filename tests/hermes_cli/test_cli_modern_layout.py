@@ -164,3 +164,53 @@ def test_long_user_message_soft_wraps_so_a_resize_reflows_it(monkeypatch):
             out[width] = [line for line in "\n".join(emitted).split("\n") if line.strip()]
         assert out[60] == out[140], out
         assert any(line.rstrip().endswith("word") and line.count("word") == 60 for line in out[60]), out[60]
+
+
+def test_tool_rows_keep_the_classic_tool_emoji():
+    """Each finished tool row leads with the same emoji the classic ``┊`` row shows (📖 read, 💻
+    terminal…); a failed entry swaps it for the red ✗ so failures stay obvious."""
+    from agent.display import get_cute_tool_message
+    from hermes_cli.cli_modern_layout import tool_row
+
+    # clarify has no dedicated renderer: both layouts take its registered emoji from one source.
+    for name, args in (("read_file", {"path": "/etc/hostname"}), ("terminal", {"command": "echo ok"}),
+                       ("execute_code", {"code": "import math"}), ("clarify", {"question": "Which?"})):
+        classic_emoji = get_cute_tool_message(name, args, 0.2).split()[1]
+        assert _plain(tool_row(name, args, 0.2)).startswith(classic_emoji + " "), (name, classic_emoji)
+    failed = _plain(tool_row("terminal", {"command": "false"}, 0.2, result='{"exit_code": 1, "output": ""}'))
+    assert failed.startswith("✗ ") and "[exit 1]" in failed, failed
+
+
+def test_every_block_is_framed_by_bars_and_blank_lines(monkeypatch):
+    """User message, reasoning and answer each read as: blank line, bar, content, bar, blank line.
+    The blank line after a closing bar is paid by whatever prints next (a tool row, the footer)
+    and never doubled when the next block opens with its own blank line + bar. Tool rows inside a
+    run stay tight."""
+    from cli import HermesCLI
+    import cli as climod
+    from hermes_cli import cli_modern_layout as layout
+
+    out: list[str] = []
+    monkeypatch.setattr(climod, "_cprint", lambda s: out.extend(_plain(s).split("\n")))
+    cli = HermesCLI.__new__(HermesCLI)
+    cli._modern_layout, cli.show_timestamps = True, False
+    bar = "─" * 40
+
+    cli._print_user_message_preview("read the hostname")
+    for row in layout.thought_rows(2.0, "Plan the read.", full=True):
+        climod._cprint(row)
+    climod._cprint(layout.completed_tool_line(cli, "read_file", {"path": "/etc/hostname"}, 0.2))
+    climod._cprint(layout.completed_tool_line(cli, "terminal", {"command": "echo hi"}, 0.1))
+    climod._cprint(layout.answer_label())
+    climod._cprint("It is LINUX.")
+    climod._cprint(layout.closing_separator(True))
+    climod._cprint(layout.turn_footer("1.0s"))
+
+    rows = [r.rstrip() for r in out]
+    start = rows.index("❯ read the hostname") - 1
+    got = ["BAR" if r == bar else ("" if not r else r.split()[0]) for r in rows[start - 1:]]
+    assert got == ["", "BAR", "❯", "BAR",          # user message
+                   "", "BAR", "Plan", "∴", "BAR",  # reasoning
+                   "", "📖", "💻",                  # tool rows, tight
+                   "", "BAR", "☤", "It", "BAR",    # answer
+                   "", "─"], got                   # footer
