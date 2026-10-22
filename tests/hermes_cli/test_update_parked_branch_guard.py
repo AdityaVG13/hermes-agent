@@ -603,6 +603,109 @@ def test_switch_branch_flag_overrides_in_place_strategy(
     )
 
 
+def _in_place_custom_branch(repo, monkeypatch, *, conflicting):
+    """update_in_place configured; the parked branch carries a local commit (touching a.txt,
+    which upstream also edits, when *conflicting*) plus an uncommitted edit to its own file."""
+    import hermes_cli.config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config, "load_config",
+        lambda: {"updates": {"parked_branch_strategy": "update_in_place"}},
+    )
+    monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ())
+    (repo / "feature.txt").write_text("unmerged work\n", encoding="utf-8")
+    if conflicting:
+        (repo / "a.txt").write_text("local\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "feature work")
+    (repo / "feature.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    _patch_update_flow(monkeypatch, repo)
+
+
+class _StopAfterPull(Exception):
+    pass
+
+
+def test_dirty_custom_branch_updates_in_place_and_restores_edits(
+    repo_pair, monkeypatch, capsys
+):
+    """In place the checkout never moves, so a dirty tree is the plain autostash case: stash,
+    merge origin/main into the branch, restore. It used to SKIP the whole update."""
+    _in_place_custom_branch(repo_pair, monkeypatch, conflicting=False)
+    monkeypatch.setattr(
+        update_cmd, "_complete_source_update",
+        lambda *a, **k: (_ for _ in ()).throw(_StopAfterPull()),
+    )
+    args = SimpleNamespace(branch=None, yes=True, force=False, force_venv=False)
+
+    with pytest.raises(_StopAfterPull):
+        hermes_main.cmd_update(args)
+
+    out = capsys.readouterr().out
+    assert "CODE UPDATE SKIPPED" not in out
+    assert _git(repo_pair, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "old-feature"
+    assert (repo_pair / "b.txt").exists()
+    assert "feature work" in _git(repo_pair, "log", "--oneline").stdout
+    assert (repo_pair / "feature.txt").read_text(encoding="utf-8") == "uncommitted edit\n"
+    assert _git(repo_pair, "stash", "list").stdout.strip() == ""
+
+
+def test_in_place_merge_conflict_aborts_and_restores_edits(
+    repo_pair, monkeypatch, capsys
+):
+    """A new conflict stops the update with nothing changed, and the uncommitted edits it
+    stashed come back instead of being stranded in `git stash list`."""
+    _in_place_custom_branch(repo_pair, monkeypatch, conflicting=True)
+    head_before = _git(repo_pair, "rev-parse", "HEAD").stdout.strip()
+    args = SimpleNamespace(branch=None, yes=True, force=False, force_venv=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        hermes_main.cmd_update(args)
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Merge conflict between local commits and upstream" in out
+    assert "Conflicting: a.txt" in out
+    assert _git(repo_pair, "rev-parse", "HEAD").stdout.strip() == head_before
+    assert not (repo_pair / ".git" / "MERGE_HEAD").exists()
+    assert (repo_pair / "feature.txt").read_text(encoding="utf-8") == "uncommitted edit\n"
+    assert _git(repo_pair, "stash", "list").stdout.strip() == ""
+
+
+def test_in_place_merge_replays_recorded_rerere_resolution(
+    repo_pair, monkeypatch, capsys
+):
+    """A conflict resolved once by hand (rerere.enabled) is replayed and committed by the
+    update instead of stopping it again."""
+    _in_place_custom_branch(repo_pair, monkeypatch, conflicting=True)
+    _git(repo_pair, "config", "rerere.enabled", "true")
+    _git(repo_pair, "stash", "-q")
+    branch_tip = _git(repo_pair, "rev-parse", "HEAD").stdout.strip()
+    assert _git(repo_pair, "merge", "-q", "origin/main", check=False).returncode != 0
+    (repo_pair / "a.txt").write_text("two + local\n", encoding="utf-8")
+    _git(repo_pair, "add", "a.txt")
+    _git(repo_pair, "commit", "-qm", "resolution recorded once")
+    _git(repo_pair, "reset", "-q", "--hard", branch_tip)
+    _git(repo_pair, "stash", "pop", "-q")
+    monkeypatch.setattr(
+        update_cmd, "_complete_source_update",
+        lambda *a, **k: (_ for _ in ()).throw(_StopAfterPull()),
+    )
+    args = SimpleNamespace(branch=None, yes=True, force=False, force_venv=False)
+
+    with pytest.raises(_StopAfterPull):
+        hermes_main.cmd_update(args)
+
+    out = capsys.readouterr().out
+    assert "Re-applied recorded conflict resolution(s) (git rerere): a.txt" in out
+    assert (repo_pair / "a.txt").read_text(encoding="utf-8") == "two + local\n"
+    assert (repo_pair / "b.txt").exists()
+    parents = _git(repo_pair, "rev-list", "--parents", "-n1", "HEAD").stdout.split()[1:]
+    assert parents == [branch_tip, _git(repo_pair, "rev-parse", "origin/main").stdout.strip()]
+    assert (repo_pair / "feature.txt").read_text(encoding="utf-8") == "uncommitted edit\n"
+    assert _git(repo_pair, "stash", "list").stdout.strip() == ""
+
+
 def test_update_auto_switches_clean_merged_parked_branch(
     repo_pair, monkeypatch, capsys
 ):

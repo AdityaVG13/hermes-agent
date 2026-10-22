@@ -112,6 +112,15 @@ def test_unmapped_stops_are_not_expected_rows():
     assert _fleet_probe_expected_runtimes(_plan([]), pre, None, out.restarted_services, killed)
 
 
+def test_restarted_serve_units_are_not_expected_rows():
+    # A serve-only host (systemd hermes-serve, no gateway) restarted its backend: serve never
+    # publishes a gateway row, so the empty probe is healthy, not "verification incomplete".
+    assert not _fleet_probe_expected_runtimes(_plan([]), [], None, ["hermes-serve"], set())
+    assert not _fleet_probe_expected_runtimes(_plan([]), [], None, ["hermes-dashboard-work.service"], set())
+    assert _fleet_probe_expected_runtimes(_plan([]), [], None, ["hermes-serve", "hermes-gateway"], set())
+    assert _fleet_probe_expected_runtimes(_plan([]), [], None, ["ai.hermes.gateway"], set())
+
+
 def test_unmapped_stop_keeps_the_restart_owed(monkeypatch, tmp_path):
     # Codemap §6 V7/V12: an unmapped gateway stopped with no successor used to be "accounted for"
     # (update exit 0, obligation cleared) and stayed down silently. It still predicts no row (the

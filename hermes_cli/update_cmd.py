@@ -8,6 +8,7 @@ main -> update_cmd -> update_cmd_*; ``_m()`` resolves ``hermes_cli.main`` at cal
 import logging
 from contextlib import suppress
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -850,6 +851,62 @@ def _complete_source_update(request: dict | None) -> None:
                      retry="the next `hermes update` adopts it again")
 
 
+class _MergeConflictAborted(SystemExit):
+    """The custom-branch merge conflicted and was aborted: the tree is back at its pre-update commit."""
+
+
+_RERERE_REPLAYED = re.compile(r"^(?:Resolved|Staged) '(.+)' using previous resolution\.$", re.MULTILINE)
+_CONFLICT_MARKERS = ("<<<<<<< ", "||||||| ", ">>>>>>> ")
+
+
+def _unmerged_paths(git_cmd) -> set[str] | None:
+    listed = _git_run(git_cmd, ["diff", "--name-only", "-z", "--diff-filter=U"])
+    return None if listed.returncode != 0 else {p for p in (listed.stdout or "").split("\0") if p}
+
+
+def _conclude_rerere_merge(git_cmd, merge_output: str) -> bool:
+    """Commit a conflicted merge that ``git rerere`` resolved entirely from recorded resolutions.
+
+    A custom branch carried across updates meets the same upstream conflict again (a retried run,
+    a second machine carrying the same patches); resolved once by hand with ``rerere.enabled``,
+    git replays it. Only paths git reports as replayed may be unmerged and none may keep a
+    conflict marker; anything else is a new conflict and the caller aborts."""
+    replayed = set(_RERERE_REPLAYED.findall(merge_output))
+    if not replayed or _git_run(git_cmd, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).returncode != 0:
+        return False
+    unmerged = _unmerged_paths(git_cmd)
+    if unmerged is None or not unmerged <= replayed:
+        return False
+    for rel in unmerged:
+        try:
+            text = (Path(_m().PROJECT_ROOT) / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        if any(line.startswith(_CONFLICT_MARKERS) for line in text.splitlines()):
+            return False
+    if unmerged and _git_run(git_cmd, ["add", "--", *sorted(unmerged)]).returncode != 0:
+        return False
+    if _unmerged_paths(git_cmd) != set():
+        return False
+    # No hooks, exactly like a clean `git merge` (which never runs pre-commit): the staged set is
+    # upstream's whole delta, which a repository lint hook was never meant to gate.
+    if _git_run(git_cmd, ["commit", "--no-edit", "--no-verify"]).returncode != 0:
+        return False
+    print(f"  ✓ Re-applied recorded conflict resolution(s) (git rerere): {', '.join(sorted(replayed))}")
+    return True
+
+
+def _tree_at_commit(git_cmd, sha) -> bool:
+    """HEAD is *sha*, no merge or interrupted pull is pending and no tracked file differs from it."""
+    if not sha or _capture_head_sha(git_cmd, _m().PROJECT_ROOT) != sha:
+        return False
+    if interrupted_pull_marker(_m().PROJECT_ROOT).is_file():
+        return False
+    if _git_run(git_cmd, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).returncode == 0:
+        return False
+    return _git_run(git_cmd, ["diff", "--quiet", "HEAD", "--"]).returncode == 0
+
+
 def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_ref=None) -> None:
     """Reconcile a proven non-fast-forwardable checkout.
 
@@ -867,13 +924,18 @@ def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha, *, target_r
             f"merging origin/{branch} instead of resetting so local commits survive...")
         # Best-effort safety tag as a recovery anchor.
         _git_run(git_cmd, ["tag", f"pre-update-{_time.strftime('%Y%m%d-%H%M%S')}"])
-        if _git_run(git_cmd, ["merge", "--no-edit", merge_ref]).returncode != 0:
+        merge = _git_run(git_cmd, ["merge", "--no-edit", merge_ref])
+        if merge.returncode != 0 and not _conclude_rerere_merge(
+                git_cmd, f"{merge.stdout or ''}\n{merge.stderr or ''}"):
+            conflicted = sorted(_unmerged_paths(git_cmd) or ())
             _git_run(git_cmd, ["merge", "--abort"])
             print("✗ Merge conflict between local commits and upstream — update stopped, nothing was changed.")
+            if conflicted:
+                print(f"  Conflicting: {', '.join(conflicted[:10])}")
             print(f"  Resolve manually: cd {_m().PROJECT_ROOT} && git merge origin/{branch}")
             print("  Then re-run the update. Local work is untouched.")
             _record_stop("merge_conflict")
-            sys.exit(1)
+            raise _MergeConflictAborted(1)
         return
     # Same branch and proven non-ancestor: an upstream force-push/rebase may lose nothing,
     # while local commits on this branch lose everything. The reflog is only an expiring
@@ -1098,6 +1160,7 @@ def _pull_updates(
     custom branch -> merge, same branch -> rescue ref then reset; a
     post-pull syntax error in a critical file rolls back. Exits on failure; returns the SHA HEAD had to move off."""
     update_succeeded = False
+    merge_aborted = False
     # Rescue refs must retain the immediate pre-pull tip, even when syntax
     # rollback needs to cross an earlier upstream sync.
     pre_pull_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
@@ -1177,10 +1240,19 @@ def _pull_updates(
             # Only a validated update is published to the fork (#97052 sync, after the commit point).
             _push_synced_fork(git_cmd, _m().PROJECT_ROOT)
         update_succeeded = True
+    except _MergeConflictAborted:
+        merge_aborted = True
+        raise
     finally:
         if auto_stash_ref is not None:
-            # No stash restore if the update failed — tree state is unknown.
-            if not update_succeeded:
+            # No stash restore if the update failed — tree state is unknown — except after an
+            # aborted merge proven back at the commit the stash was taken on: that is a no-op update.
+            if not update_succeeded and merge_aborted and _tree_at_commit(git_cmd, pre_pull_sha):
+                print("  ↺ Checkout unchanged — re-applying your stashed local changes...")
+                _m()._restore_stashed_changes(
+                    git_cmd, _m().PROJECT_ROOT, auto_stash_ref, prompt_user=prompt_for_restore,
+                    input_fn=gw_input_fn, checkout_move=_moves_for(_windows_gateway_resume))
+            elif not update_succeeded:
                 print(f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})")
                 print("  Restore manually with: git stash apply")
                 _clear_pending_autostash()  # named just above; a later boundary must not repeat it
@@ -1345,15 +1417,24 @@ def _apply_parked_branch_guard(
 
     By branch contents + updates.parked_branch_strategy: fully merged -> switch back;
     unmerged -> "switch" (default; loud "kept" notice) or "update_in_place" (merge origin/<target>
-    INTO the branch, checkout never moves; --switch-branch overrides once); dirty/unverifiable ->
-    touch nothing, warn, ``sys.exit(1)`` with the code update SKIPPED (also when the target is
-    missing). Returns ``(parked_branch_switched, in_place_update, switch_block_reason)``.
+    INTO the branch, checkout never moves; --switch-branch overrides once; a dirty tree is
+    autostashed and restored there); otherwise dirty/unverifiable -> touch nothing, warn,
+    ``sys.exit(1)`` with the code update SKIPPED (also when the target is missing).
+    Returns ``(parked_branch_switched, in_place_update, switch_block_reason)``.
     """
     if current_branch == branch or current_branch == "HEAD":
         return False, False, None
+    _in_place_configured = False
+    with _best_effort('Could not read updates.parked_branch_strategy: %s'):
+        _in_place_configured = (
+            _updates_config().get("parked_branch_strategy", "switch") == "update_in_place")
+    in_place = _in_place_configured and not switch_branch
     switch_safe, switch_block_reason = _m()._assess_parked_branch_switch(
         git_cmd, _m().PROJECT_ROOT, current_branch, branch)
-    if not switch_safe:
+    # Dirty is unsafe only across a branch switch. In place the checkout never moves, so local
+    # edits take the ordinary autostash path (stash, merge, restore) like they do on main.
+    dirty_in_place = in_place and switch_block_reason == "dirty"
+    if not switch_safe and not dirty_in_place:
         _m()._print_parked_branch_skip_warning(
             git_cmd, _m().PROJECT_ROOT, current_branch, branch, switch_block_reason)
         print()
@@ -1361,14 +1442,10 @@ def _apply_parked_branch_guard(
         _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
         _record_stop("parked_branch_blocked")
         sys.exit(1)
-    if not switch_block_reason.startswith("unmerged:"):
+    if not dirty_in_place and not switch_block_reason.startswith("unmerged:"):
         print(f"  ⚠ Checkout was parked on '{current_branch}' (fully merged) — switching back to {branch}...")
         return True, False, switch_block_reason
-    _in_place_configured = False
-    with _best_effort('Could not read updates.parked_branch_strategy: %s'):
-        _in_place_configured = (
-            _updates_config().get("parked_branch_strategy", "switch") == "update_in_place")
-    if not _in_place_configured or switch_branch:
+    if not in_place:
         _m()._print_parked_branch_kept_notice(
             current_branch, branch, switch_block_reason.split(":", 1)[1])
         return True, False, switch_block_reason
@@ -1379,7 +1456,8 @@ def _apply_parked_branch_guard(
         sys.exit(1)
     print(
         f"  ℹ On branch '{current_branch}' — updating it in place from "
-        f"origin/{branch} (no branch switch; local commits preserved).")
+        f"origin/{branch} (no branch switch; local commits preserved"
+        f"{'; uncommitted edits are stashed and restored' if dirty_in_place else ''}).")
     return False, True, switch_block_reason
 
 

@@ -1807,8 +1807,13 @@ def _fleet_probe_expected_runtimes(
     See #93406.
     """
     del windows_resume_token  # excluded on purpose — see docstring
+    # A restarted serve/dashboard unit is row-incapable for the same reason as its plan record
+    # (#97332): a serve-only host restarting its backend must not demand gateway rows.
+    gateway_services = [
+        name for name in restarted_services or ()
+        if not _is_serve_or_dashboard_unit(f"{str(name).removesuffix('.service')}.service")]
     # See #93406.
-    if restarted_services or killed_pids:
+    if gateway_services or killed_pids:
         return True
     if pre_restart_pids is None or pre_restart_pids:
         return True
