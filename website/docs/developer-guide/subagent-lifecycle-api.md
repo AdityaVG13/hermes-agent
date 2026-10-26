@@ -72,6 +72,16 @@ timeouts are explicitly rejected until Hermes can
 support them without weakening isolation. Use `allowed_toolsets` to narrow a
 child; Hermes's existing unsafe-tool block remains enforced.
 
+## Capacity
+
+Native lifecycle launches share a profile-scoped admission budget across plugins
+and parent sessions, using `delegation.max_concurrent_children`. The executor uses
+the same ceiling: a setting of 16 permits 16 concurrently executing native worker
+threads. Once full, launch raises `SubagentLifecycleError` rather than silently
+queueing additional work. Terminal results release capacity; a cancellation request
+alone does not. Different profiles have separate budgets. Ordinary `delegate_task`
+uses its own admission path, so this is not a combined quota across both APIs.
+
 ## Routing
 
 Children follow the `delegation` config (`provider`, `model`, `base_url`,

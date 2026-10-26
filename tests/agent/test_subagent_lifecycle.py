@@ -92,6 +92,44 @@ def test_cancel_is_cooperative_and_forged_handle_is_unknown(lifecycle):
     assert other_service.status(handle).state is SubagentState.UNKNOWN
 
 
+@pytest.mark.parametrize("limit", [2, 16])
+def test_configured_capacity_executes_and_is_shared_by_profile(lifecycle, monkeypatch, tmp_path, limit):
+    """All admitted workers run; changing the parent cannot bypass the cap."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("tools.delegate_tool._load_config", lambda: {"max_concurrent_children": limit})
+    finish, started = threading.Event(), threading.Event()
+    lock = threading.Lock()
+    running = 0
+
+    def run(*_args):
+        nonlocal running
+        with lock:
+            running += 1
+            if running == limit:
+                started.set()
+        assert finish.wait(10)
+        return {"status": "completed", "summary": "bounded work finished"}
+
+    monkeypatch.setattr("tools.delegate_tool._run_single_child", run)
+    handles = []
+    other = SubagentLifecycleService(lambda: SimpleNamespace(session_id="other-parent", enabled_toolsets=["file"]))
+    try:
+        handles.extend(lifecycle.launch(SubagentLaunchRequest(goal="bounded work")) for _ in range(limit))
+        assert started.wait(3), f"configured {limit} workers did not execute concurrently"
+        with pytest.raises(SubagentLifecycleError, match="capacity"):
+            handles.append(other.launch(SubagentLaunchRequest(goal="over budget")))
+        with monkeypatch.context() as profile:
+            profile.setenv("HERMES_HOME", str(tmp_path / "other-profile"))
+            handles.append(other.launch(SubagentLaunchRequest(goal="separate profile budget")))
+    finally:
+        finish.set()
+        for handle in handles:
+            service = other if handle.parent_session_id == "other-parent" else lifecycle
+            assert service.wait(handle, timeout_seconds=3).state is SubagentState.SUCCEEDED
+    resumed = lifecycle.launch(SubagentLaunchRequest(goal="released capacity"))
+    assert lifecycle.wait(resumed, timeout_seconds=3).state is SubagentState.SUCCEEDED
+
+
 def test_cancel_uses_explicit_hard_interrupt(lifecycle):
     handle = lifecycle.launch(SubagentLaunchRequest(goal="x"))
     record = lifecycle._record(handle)

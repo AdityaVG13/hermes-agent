@@ -144,6 +144,7 @@ class _Record:
     started_at: Optional[float] = None
     completed_at: Optional[float] = None
     result: Optional[SubagentResult] = None
+    profile_home: Optional[str] = None
 
 
 @dataclasses.dataclass
@@ -157,7 +158,8 @@ class _Registry:
 
 _REGISTRY = _Registry()
 from tools.daemon_pool import DaemonThreadPoolExecutor as _DaemonExecutor  # daemon: a wedged child never blocks exit
-_EXECUTOR = _DaemonExecutor(max_workers=8, thread_name_prefix="hermes-lifecycle")
+_EXECUTORS: dict[str, tuple[int, _DaemonExecutor]] = {}
+_LAUNCH_LOCK = threading.RLock()
 _SECRET = secrets.token_bytes(32)
 _ACTIVE_PARENT_AGENT: contextvars.ContextVar[Any] = contextvars.ContextVar("hermes_subagent_lifecycle_parent", default=None)
 
@@ -275,6 +277,11 @@ class SubagentLifecycleService:
         self._parent_agent_resolver = parent_agent_resolver
 
     def launch(self, request: SubagentLaunchRequest | Mapping[str, Any]) -> SubagentHandle:
+        # Admission and construction are one transaction across plugin instances.
+        with _LAUNCH_LOCK:
+            return self._launch(request)
+
+    def _launch(self, request: SubagentLaunchRequest | Mapping[str, Any]) -> SubagentHandle:
         parent = self._parent_agent_resolver()
         if parent is None:
             raise SubagentLifecycleError("No active Hermes parent session is available.")
@@ -284,10 +291,22 @@ class SubagentLifecycleService:
         if request.parent_session_id and request.parent_session_id != parent_session_id:
             raise SubagentLifecycleError("parent_session_id does not match the active session.")
         correlation_key = (parent_session_id, request.correlation_id or "")
+        from hermes_constants import get_hermes_home
+        from tools.delegate_tool import _get_max_concurrent_children
+        owner, limit = str(get_hermes_home()), _get_max_concurrent_children()
         with _REGISTRY.lock:
             self._cleanup_locked()
             if request.correlation_id and correlation_key in _REGISTRY.correlations:
                 raise SubagentLifecycleError("Duplicate correlation_id for this parent session.")
+            active = sum(r.profile_home == owner and r.result is None for r in _REGISTRY.records.values())
+            if active >= limit:
+                raise SubagentLifecycleError(f"Native subagent capacity is full ({active}/{limit}); collect or cancel existing work.")
+            pool = _EXECUTORS.get(owner)
+            if pool is None or pool[0] != limit:
+                if pool is not None:
+                    pool[1].shutdown(wait=False)
+                pool = (limit, _DaemonExecutor(max_workers=limit, thread_name_prefix="hermes-lifecycle"))
+                _EXECUTORS[owner] = pool
         # Lazy: delegate construction stays internal, plugins never import private delegation helpers.
         from tools.delegate_tool import (
             _build_child_preserving_parent_tools, _credential_overrides, _load_config, _resolve_delegation_credentials,
@@ -314,12 +333,12 @@ class SubagentLifecycleService:
             getattr(child, "provider", None), getattr(child, "model", None), getattr(child, "_delegate_role", request.role),
             int(getattr(child, "_delegate_depth", 1) or 1), self._capability(subagent_id, parent_session_id, created),
         )
-        record = _Record(handle, SubagentState.PENDING, created, agent=child)
+        record = _Record(handle, SubagentState.PENDING, created, agent=child, profile_home=owner)
         with _REGISTRY.lock:
             _REGISTRY.records[subagent_id] = record
             if request.correlation_id:
                 _REGISTRY.correlations[correlation_key] = subagent_id
-        record.future = _EXECUTOR.submit(self._run, record, request.goal, parent)
+        record.future = pool[1].submit(self._run, record, request.goal, parent)
         return handle
 
     def status(self, handle: SubagentHandle | Mapping[str, Any]) -> SubagentStatus:
