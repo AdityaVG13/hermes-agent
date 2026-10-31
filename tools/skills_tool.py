@@ -5,6 +5,7 @@ scripts/. `skills_list` returns name/description only; `skill_view` returns full
 linked files. Sibling modules (skills_tool_setup / _plugin / _dedup) re-export here."""
 
 import contextvars
+import hashlib
 import json
 import logging
 import os
@@ -50,8 +51,102 @@ _SCAN_LOCK = threading.Lock()
 
 
 def clear_skills_cache() -> None:
-    """Drop the scanned catalog so the next listing re-scans (explicit reloads must re-scan now)."""
+    """Drop the scanned catalog (memory + disk) so the next listing re-scans (explicit reloads
+    must re-scan now)."""
     _SKILLS_CACHE.clear()
+    with suppress(OSError):
+        _catalog_cache_path().unlink(missing_ok=True)
+
+
+# Disk-persisted catalog rows (restart-warm boots): the in-memory cache dies with the gateway
+# process, so the first keystroke after a restart re-parsed every SKILL.md (~0.5 s at ~900
+# skills). The resolved rows are a pure function of the library the signature already proves
+# unchanged, so they persist keyed by the signature digest: a fresh process walks the signature
+# (~20 ms), loads the rows, skips the parse pass. Any library/config/platform change changes the
+# signature, so a stale file is dead weight until the next scan rewrites it; explicit reloads
+# (clear_skills_cache) delete it. Best-effort everywhere: any read/write failure falls through
+# to a normal scan.
+_CATALOG_DISK_CACHE_NAME = "skills-catalog-v1.json"
+
+
+def _catalog_cache_path() -> Path:
+    return get_hermes_home() / "cache" / _CATALOG_DISK_CACHE_NAME
+
+
+def _ensure_catalog_cache_dir() -> None:
+    """Exist before the signature walk, not after: creating <home>/cache/ mid-call would bump
+    the home dir's mtime and invalidate that very walk's signature (fresh fixture homes have
+    no cache dir yet; real homes do). Idempotent and suppressed — never load-bearing."""
+    with suppress(OSError):
+        _catalog_cache_path().parent.mkdir(parents=True, exist_ok=True)
+
+
+def _signature_digest(signature) -> str:
+    # Canonicalize: signature[1] is a frozenset whose iteration order (and so repr) is
+    # per-process random under hash randomization — a plain repr digest would never match
+    # across processes, defeating the restart-warm cache (only same-process hits).
+    dirs, disabled, platform = signature
+    payload = repr((dirs, sorted(map(repr, disabled or ())), platform))
+    return hashlib.sha256(payload.encode("utf-8", "backslashreplace")).hexdigest()
+
+
+def _disk_key(cache_key) -> str:
+    return "|".join(str(part) for part in cache_key)
+
+
+def _rows_to_json(rows):
+    out = []
+    for s in rows:
+        r = dict(s)
+        for k in ("path", "root"):
+            if r.get(k) is not None:
+                r[k] = str(r[k])
+        out.append(r)
+    return out
+
+
+def _rows_from_json(rows):
+    out = []
+    for s in rows:
+        if not isinstance(s, dict):
+            return None
+        r = dict(s)
+        for k in ("path", "root"):
+            if r.get(k) is not None:
+                r[k] = Path(r[k])
+        out.append(r)
+    return out
+
+
+def _load_disk_catalog(cache_key, signature) -> list[dict[str, Any]] | None:
+    try:
+        data = json.loads(_catalog_cache_path().read_text(encoding="utf-8"))
+        entry = data.get(_disk_key(cache_key)) if isinstance(data, dict) else None
+        if not isinstance(entry, dict) or entry.get("digest") != _signature_digest(signature):
+            return None
+        rows = _rows_from_json(entry.get("rows") or [])
+        return rows or None
+    except Exception:
+        return None
+
+
+def _store_disk_catalog(cache_key, signature, rows) -> None:
+    try:
+        path = _catalog_cache_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data[_disk_key(cache_key)] = {
+            "digest": _signature_digest(signature), "rows": _rows_to_json(rows)}
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        pass
 
 
 def _dir_tree_signature(root, sig, depth=_SIGNATURE_MAX_DEPTH) -> None:
@@ -264,8 +359,13 @@ def _is_skill_disabled(*names: str, platform: str | None = None) -> bool:
 
 def skill_search_dirs() -> tuple[list[tuple[int, Path]], Path]:
     """(``(tier, dir)`` roots in precedence order, active_skills_dir) — the shared
-    ``agent.skill_utils.get_skill_search_roots`` order with the live profile dir (dropped if absent)."""
+    ``agent.skill_utils.get_skill_search_roots`` order with the live profile dir (dropped if absent).
+
+    Also brings the catalog disk-cache dir into existence: EVERY signature walk comes through
+    here first, so the dir predates any recorded signature and a later store's writes can never
+    look like library change (a mid-scan create would bump the home root's mtime)."""
     from agent.skill_utils import TIER_LOCAL, get_skill_search_roots
+    _ensure_catalog_cache_dir()
     active_skills_dir = _skills_dir()
     roots = [(t, d) for t, d in get_skill_search_roots(active_skills_dir)
              if t != TIER_LOCAL or d.exists()]
@@ -300,6 +400,10 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
         # Single-flight: a caller that waited while another thread scanned must not rescan.
         if (hit := _cached_result()) is not None:
             return hit
+        disk = _load_disk_catalog(cache_key, signature)
+        if disk is not None:
+            _SKILLS_CACHE[cache_key] = (signature, time.monotonic(), disk)
+            return [dict(s) for s in disk]
         scanned = []
         for tier, scan_dir in roots:  # project dirs go through the quarantine chokepoint
             _iter = iter_project_skill_files if tier == TIER_PROJECT else lambda d: iter_skill_index_files(d, "SKILL.md")
@@ -336,6 +440,7 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
         # Keyed by the signature computed BEFORE the scan: a write racing the scan changes the
         # signature, so the next call re-scans instead of serving a torn result.
         _SKILLS_CACHE[cache_key] = (signature, time.monotonic(), skills)
+        _store_disk_catalog(cache_key, signature, skills)
     return [dict(s) for s in skills]
 
 

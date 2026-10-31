@@ -26,6 +26,10 @@ EXCLUDED_SKILL_DIRS = frozenset((
     ".venv", "venv", "node_modules", "site-packages", "__pycache__",
     ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
     ".skillopt", ".skillloop-snapshots", "_sources",
+    # Caches are runtime state, never skill content: <hermes-home>/cache holds the
+    # catalog disk cache and scratch (both churn constantly — scratch writes were
+    # bumping a walked dir's mtime and invalidating the catalog mid-session).
+    "cache",
 ))
 
 # Progressive-disclosure support dirs inside a skill package: loaded explicitly
