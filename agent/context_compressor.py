@@ -3990,7 +3990,7 @@ PREVIOUS SUMMARY:
 NEW TURNS TO INCORPORATE:
 {content_to_summarize}{_memory_section}
 
-Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new completed actions to the numbered list (continue numbering). Move items from "In Progress" to "Completed Actions" when done. Move answered questions to "Resolved Questions". Update "Active State" to reflect current state. Remove information only if it is clearly obsolete. CRITICAL: Update "{HISTORICAL_TASK_HEADING}" to reflect the user's most recent unfulfilled input — this includes any question, decision request, or discussion turn that the assistant has not yet answered. Only write "None" if the last exchange was fully resolved.
+Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new completed actions to the numbered list (continue numbering). Move items from "In Progress" to "Completed Actions" when done. Move answered questions to "Resolved Questions". Update "Active State" to reflect current state. Remove information only if it is clearly obsolete. Carry the "Relevant Files" gists and the "Skills Loaded" entries forward from the previous summary, adding new ones from the new turns; drop an entry only when its file or skill is clearly obsolete. CRITICAL: Update "{HISTORICAL_TASK_HEADING}" to reflect the user's most recent unfulfilled input — this includes any question, decision request, or discussion turn that the assistant has not yet answered. Only write "None" if the last exchange was fully resolved.
 
 {_template_sections}"""
         else:
@@ -4074,7 +4074,16 @@ the user's correction and record what changed as a result.]
 {_section["resolved_questions"]}
 
 ## Relevant Files
-[Files read, modified, or created — with brief note on each]
+[Files read, modified, or created. For each: path — a one-to-two-line gist of the
+durable facts the conversation learned from it (what it is, key constraints,
+anchors such as line numbers or symbol names). Write facts, not adjectives, so a
+later turn re-reads the file only when it needs its exact text.]
+
+## Skills Loaded
+[Skills loaded with skill_view during the compacted turns: name, the section(s)
+read, and the one or two rules from it the conversation actually applied. Later
+turns rely on this record instead of reloading the skill; reload a skill only
+when its detailed procedure is needed. If none were loaded, omit this section.]
 
 ## Critical Context
 [Any specific values, error messages, configuration details, or data that would be lost without explicit preservation. NEVER include API keys, tokens, passwords, or credentials — write [REDACTED] instead.]{_session_log_section}
