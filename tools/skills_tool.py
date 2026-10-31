@@ -31,13 +31,13 @@ from tools.skill_provenance import is_background_review
 
 logger = logging.getLogger(__name__)
 
-# Per-session discovery cache: {cache_key: (signature, timestamp, skills_list)}. Signature =
-# every catalog directory's mtime and child-dir names, walked like the catalog itself (an install
-# under an existing category such as ``mlops/training/`` moves only that dir's mtime) + the disabled
-# set (config-only change, no mtime) + platform; the TTL bounds staleness from in-place SKILL.md
-# edits, which no directory signature can see.
+# Per-session discovery cache: {cache_key: (signature, timestamp, skills_list)}. Signature = every
+# catalog directory's mtime and child-dir names, walked like the catalog itself (an install under an
+# existing category such as ``mlops/training/`` moves only that dir's mtime) + each dir's top-level
+# SKILL.md (mtime, size — a follow-symlinks stat, so an edit at a linked target shows too) + the
+# disabled set (config-only change, no mtime) + platform. File facts in the signature mean in-place
+# SKILL.md edits invalidate the cache immediately: no TTL is needed or used.
 _SKILLS_CACHE: dict = {}
-_SKILLS_CACHE_TTL_SECONDS = 30.0
 # Deepest directory the signature descends to below a root (a skill sits at <cat>/<sub>/<skill>/).
 _SIGNATURE_MAX_DEPTH = 6
 
@@ -50,15 +50,18 @@ _SCAN_LOCK = threading.Lock()
 
 
 def clear_skills_cache() -> None:
-    """Drop the scanned catalog so the next listing re-scans (explicit reloads must not wait out the TTL)."""
+    """Drop the scanned catalog so the next listing re-scans (explicit reloads must re-scan now)."""
     _SKILLS_CACHE.clear()
 
 
 def _dir_tree_signature(root, sig, depth=_SIGNATURE_MAX_DEPTH) -> None:
-    """Append ``(dir, mtime_ns, child dir names)`` for *root* and the dirs below it the catalog walks
-    (``iter_skill_index_files``: no excluded dirs, no support dirs of a skill), depth-bounded. The child
-    names, not only mtimes: an install and an uninstall inside one coarse mtime tick (1-2 s on some
-    filesystems) leave every mtime equal, and the change must still show. ~1 ms for 170 dirs."""
+    """Append ``(dir, mtime_ns, child dir names, skill_md facts)`` for *root* and the dirs below it
+    the catalog walks (``iter_skill_index_files``: no excluded dirs, no support dirs of a skill),
+    depth-bounded. The child names, not only mtimes: an install and an uninstall inside one coarse
+    mtime tick (1-2 s on some filesystems) leave every mtime equal, and the change must still show.
+    ``skill_md facts`` is the dir's top-level SKILL.md ``(mtime_ns, size)`` via a follow-symlinks
+    stat — in-place edits change no directory fact, so the file itself must be in the signature.
+    ~1 ms for 170 dirs."""
     from agent.skill_utils import EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS
     try:
         mtime = os.stat(root).st_mtime_ns
@@ -66,15 +69,17 @@ def _dir_tree_signature(root, sig, depth=_SIGNATURE_MAX_DEPTH) -> None:
             entries = list(it)
     except OSError:
         return
-    names, is_skill = [], False
+    names, is_skill, skill_md_facts = [], False, None
     for entry in entries:
         with suppress(OSError):
             if entry.is_dir():
                 names.append(entry.name)
             elif entry.name == "SKILL.md":
                 is_skill = True
+                md_stat = entry.stat()  # follows symlinks: an edit at a linked target shows
+                skill_md_facts = (md_stat.st_mtime_ns, md_stat.st_size)
     names.sort()
-    sig.append((str(root), mtime, tuple(names)))
+    sig.append((str(root), mtime, tuple(names), skill_md_facts))
     if depth <= 0:
         return
     # A skill dir is a leaf (iter_skill_index_files semantics): the catalog only reads its
@@ -281,7 +286,9 @@ def _skill_catalog(*, skip_disabled: bool = False, include_hidden: bool = False)
 
     def _cached_result() -> list[dict[str, Any]] | None:
         cached = _SKILLS_CACHE.get(cache_key)
-        if cached is not None and cached[0] == signature and (time.monotonic() - cached[1]) < _SKILLS_CACHE_TTL_SECONDS:
+        # Signature match is the freshness proof (file facts included), so there is no TTL to
+        # wait out: an unchanged library is served, an in-place edit re-scans immediately.
+        if cached is not None and cached[0] == signature:
             # Shallow copies: callers mutate the returned dicts (web_server annotates
             # s["enabled"]/s["usage"]); handing out cached objects would poison the cache.
             return [dict(s) for s in cached[2]]
