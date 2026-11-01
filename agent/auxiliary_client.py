@@ -5275,7 +5275,14 @@ def _resolve_api_key_branch(req: _ResolveRequest, pconfig: Any, resolve_creds: C
     from agent.provider_route_hooks import model_api_mode  # a Responses-only model: call_llm() streams responses
     from providers import get_provider_profile
     profile = get_provider_profile(provider) if final_model and not req.raw_codex else None
-    if profile is not None and model_api_mode(profile, final_model) == "codex_responses":
+    # None from api_mode_for_model means "keep the static api_mode" (providers.base);
+    # resolve the effective wire like runtime_provider does — hook answer or declared
+    # mode — so a plugin profile that declares codex_responses without a per-model hook
+    # still gets the Responses transport here.
+    effective_api_mode = model_api_mode(profile, final_model) if profile is not None and final_model else None
+    if effective_api_mode is None and profile is not None:
+        effective_api_mode = getattr(profile, "api_mode", None)
+    if effective_api_mode == "codex_responses":
         logger.debug("resolve_provider_client: %s model %s needs Responses API — wrapping", provider, final_model)
         client = CodexAuxiliaryClient(client, final_model)
     # api_mode handling for any API-key provider (direct OpenAI + codex model) and Anthropic-wire
