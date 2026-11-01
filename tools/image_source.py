@@ -71,7 +71,7 @@ async def resolve_image_source(
     # Everything else is a filesystem path — including bare relative names like "pic.png"
     # (a path-shape gate here regressed them once).
     candidate = s[len("file://"):] if s.lower().startswith("file://") else s
-    p = Path(os.path.expanduser(candidate))
+    p = _anchor_task_relative(Path(os.path.expanduser(candidate)), ctx)
     host_target = _permitted_host_read_target(p, ctx)
     if host_target is not None and host_target.is_file():
         _guard_credential_read(host_target, s)
@@ -81,6 +81,30 @@ async def resolve_image_source(
         # Any path was host-readable, so a miss means the file doesn't exist.
         raise SourceNotFound(f"media file not found: '{p}'", src=s, origin="file")
     return await _resolve_container_fallback(p, ctx, s, permitted)
+
+
+def _anchor_task_relative(p: Path, ctx: ResolveContext) -> Path:
+    """Anchor a RELATIVE media path to the task's cwd — the same base the file
+    tools resolve against (``file_tools_paths._resolve_path_for_task``) — instead
+    of the gateway process cwd. Desktop agents working inside a project otherwise
+    get 'media file not found' for every relative vision path (the process cwd is
+    wherever ``hermes gateway`` launched, not the session's project).
+
+    Local backend only: under a sandbox, a relative path keeps its namespace and
+    the container fallback exec-reads it inside the sandbox. Absolute paths,
+    ``~`` expansions, ssh/container resolutions and any resolution failure pass
+    through unchanged (preserving the historic process-cwd contract).
+    """
+    if p.is_absolute() or not _is_local_terminal_backend():
+        return p
+    try:
+        from tools.file_tools_paths import _resolve_path_for_task
+        anchored = _resolve_path_for_task(str(p), ctx.task_id or "default")
+        if isinstance(anchored, Path):
+            return anchored
+    except Exception:  # anchoring must never fail a resolution
+        pass
+    return p
 
 
 def _guard_credential_read(host_target: Path, src: str) -> None:

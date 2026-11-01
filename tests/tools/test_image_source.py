@@ -99,6 +99,46 @@ class TestLocalBackend:
         assert res.data == PNG
         assert res.origin == "file"
 
+    @pytest.mark.asyncio
+    async def test_relative_path_anchors_to_the_task_cwd(self, tmp_path, monkeypatch):
+        """A relative media path resolves against the task's cwd — the same base
+        the file tools anchor to via ``_resolve_path_for_task`` — not the gateway
+        process cwd. Desktop agents working inside a project otherwise get
+        'media file not found' for every relative vision_analyze path."""
+        isrc = _reload(monkeypatch, tmp_path / "hermes")
+        monkeypatch.setenv("TERMINAL_ENV", "local")
+        project = tmp_path / "project"
+        (project / "review").mkdir(parents=True)
+        (project / "review" / "frame.png").write_bytes(PNG)
+        monkeypatch.chdir(tmp_path)  # process cwd: the file is NOT here
+        import tools.file_tools_paths as ftp
+        monkeypatch.setattr(
+            ftp, "_resolve_base_dir",
+            lambda task_id="default", container_paths=None: project)
+        res = await isrc.resolve_image_source(
+            "review/frame.png", isrc.ResolveContext(task_id="probe-task"))
+        assert res.data == PNG
+        assert res.origin == "file"
+
+    @pytest.mark.asyncio
+    async def test_relative_path_stays_confined_under_non_local_backend(self, tmp_path, monkeypatch):
+        """Anchoring is local-backend only: under a sandbox backend a relative path
+        still takes the container exec-read, never a host read — even when the
+        task cwd is known and holds the file."""
+        isrc = _reload(monkeypatch, tmp_path / "hermes")
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        project = tmp_path / "project"
+        (project / "review").mkdir(parents=True)
+        (project / "review" / "frame.png").write_bytes(PNG)
+        import tools.file_tools_paths as ftp
+        monkeypatch.setattr(
+            ftp, "_resolve_base_dir",
+            lambda task_id="default", container_paths=None: project)
+        with pytest.raises(isrc.SourceNotFound) as ei:
+            await isrc.resolve_image_source(
+                "review/frame.png", isrc.ResolveContext(task_id="probe-task"))
+        assert ei.value.origin == "container"
+
 
 class TestNonLocalBackendConfinement:
     """The security model: under a sandbox backend, host reads are confined to
