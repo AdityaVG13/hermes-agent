@@ -1208,6 +1208,7 @@ def try_recover_primary_transport(
             with contextlib.suppress(Exception):
                 agent._retire_shared_openai_client(agent.client, reason="primary_recovery")
         rt = agent._primary_runtime
+        _refresh_transport_base_url(agent, rt)
         _apply_primary_runtime_fields(agent, rt)
         _rebuild_primary_client(agent, rt, reason="primary_recovery")
         wait_time = min(3 + retry_count, 8)
@@ -1493,6 +1494,59 @@ _TRANSIENT_TRANSPORT_ERRORS = frozenset({
     "ReadTimeout", "ConnectTimeout", "PoolTimeout", "ConnectError", "ReadError", "RemoteProtocolError",
     "APIConnectionError", "APITimeoutError",
 })
+
+# LOCAL PATCH (aditya, 2026-11-01): hosts whose base URLs may be healed by re-resolution
+# during transport recovery. Loopback endpoints are minted by local adapters (plugin loopback
+# proxies such as muse-code) whose port can move across restart overlap; remote endpoints are
+# outside the rule.
+_LOOPBACK_ENDPOINT_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+def _is_loopback_base_url(url: str) -> bool:
+    try:
+        host = (base_url_hostname(url) or "").strip().strip("[]").lower()
+    except Exception:
+        return False
+    return host in _LOOPBACK_ENDPOINT_HOSTS
+
+
+def _refresh_transport_base_url(agent, rt: dict[str, Any]) -> None:
+    """LOCAL PATCH (aditya, 2026-11-01): heal a loopback endpoint that moved after the session
+    froze its URL, before transport recovery rebuilds the client.
+
+    ``_primary_runtime`` snapshots the resolved base URL at creation; a provider whose loopback
+    adapter rebinds to a different port (restart overlap) strands the session on the dead URL —
+    every retry rebuilds the client against the same dead port until a gateway restart. Re-read
+    the provider registry (never live ``config.yaml``, matching the snapshot's credential-scoping
+    doctrine) and adopt only a loopback-to-loopback move: remote URLs, a user's local-proxy
+    override in front of a remote registry default, and static providers (registry URL == frozen
+    URL) are all left exactly as frozen.
+    """
+    frozen = (rt.get("base_url") or "").strip()
+    if not frozen or not _is_loopback_base_url(frozen):
+        return
+    try:
+        from hermes_cli.providers import get_provider as _registry_provider
+        pdef = _registry_provider(rt.get("provider") or agent.provider, allow_network=False)
+        fresh = (getattr(pdef, "base_url", "") or "").strip()
+    except Exception:
+        return
+    if not fresh or fresh == frozen or not _is_loopback_base_url(fresh):
+        return
+    logger.warning(
+        "%s endpoint moved after this session froze its URL (%s -> %s); adopting the live endpoint",
+        rt.get("provider") or agent.provider, frozen, fresh,
+    )
+    rt["base_url"] = fresh
+    client_kwargs = dict(rt.get("client_kwargs") or {})
+    if client_kwargs.get("base_url"):
+        client_kwargs["base_url"] = fresh
+        rt["client_kwargs"] = client_kwargs
+    with contextlib.suppress(Exception):
+        from agent.custom_entry_pool import SNAPSHOT_OWNER_KEY, runtime_entry_owner
+        rt[SNAPSHOT_OWNER_KEY] = runtime_entry_owner(
+            rt.get("provider") or agent.provider, rt.get("requested_provider"), fresh
+        )
 _INLINE_REASONING_PATTERNS = tuple(
     re.compile(rf"<{tag}>(.*?)</{tag}>", re.DOTALL | re.IGNORECASE)
     for tag in THINK_TAG_NAMES
