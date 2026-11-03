@@ -308,17 +308,28 @@ class ProviderProfile:
         """
         return ""
 
+    def declared_base_url(self) -> str:
+        """The configured base URL for METADATA readers (registry rows, host maps, discovery).
+
+        ``base_url`` may be a live accessor with side effects — the muse-code plugin starts a
+        loopback adapter on read and waits out a port pin — and metadata runs in every process
+        that imports the terminal tooling. Request paths keep using ``base_url``; a profile whose
+        live accessor is expensive overrides this with the endpoint it was configured with.
+        """
+        return self.base_url
+
     def get_hostname(self) -> str:
         """Return the provider's base hostname for URL-based detection.
 
-        Uses self.hostname if set explicitly, otherwise derives it from base_url.
+        Uses self.hostname if set explicitly, otherwise derives it from the declared base_url.
         e.g. 'https://api.gmi-serving.com/v1' → 'api.gmi-serving.com'
         """
         if self.hostname:
             return self.hostname
-        if self.base_url:
+        declared = self.declared_base_url()
+        if declared:
             from urllib.parse import urlparse
-            return urlparse(self.base_url).hostname or ""
+            return urlparse(declared).hostname or ""
         return ""
 
     def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

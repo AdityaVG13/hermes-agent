@@ -179,6 +179,22 @@ def register_plugin_provider(pp: Any) -> None:
     mirror_aliases(pconfig, pp)
 
 
+def _declared_base_url(pp: Any) -> str:
+    """The profile's configured base URL, never a live accessor.
+
+    Registry rows are metadata: they are rebuilt in every process that imports the terminal
+    tooling, and a profile may implement ``base_url`` as a lazily-started adapter accessor
+    (muse-code binds a loopback port on read and waits out a pin).
+    """
+    accessor = getattr(pp, "declared_base_url", None)
+    if callable(accessor):
+        try:
+            return str(accessor() or "")
+        except Exception:
+            return ""
+    return str(getattr(pp, "base_url", "") or "")
+
+
 def _profile_row(pp: Any) -> Optional[Any]:
     """The registry row *pp* declares, or None (a skipped name, an api-key profile without env vars)."""
     from hermes_cli.auth import ProviderConfig, _api_key_provider
@@ -190,9 +206,9 @@ def _profile_row(pp: Any) -> Optional[Any]:
         if not pp.env_vars:
             return None
         key_vars, url_var = _api_key_env_fields(pp)
-        return _api_key_provider(pp.name, pp.display_name or pp.name, pp.base_url, key_vars,
+        return _api_key_provider(pp.name, pp.display_name or pp.name, _declared_base_url(pp), key_vars,
                                  pp.base_url_env_var or url_var)
-    return ProviderConfig(pp.name, pp.display_name or pp.name, auth_type, inference_base_url=pp.base_url,
+    return ProviderConfig(pp.name, pp.display_name or pp.name, auth_type, inference_base_url=_declared_base_url(pp),
                           base_url_env_var=pp.base_url_env_var)
 
 
