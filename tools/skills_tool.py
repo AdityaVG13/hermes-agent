@@ -150,31 +150,32 @@ def _store_disk_catalog(cache_key, signature, rows) -> None:
 
 
 def _dir_tree_signature(root, sig, depth=_SIGNATURE_MAX_DEPTH) -> None:
-    """Append ``(dir, mtime_ns, child dir names, skill_md facts)`` for *root* and the dirs below it
-    the catalog walks (``iter_skill_index_files``: no excluded dirs, no support dirs of a skill),
-    depth-bounded. The child names, not only mtimes: an install and an uninstall inside one coarse
-    mtime tick (1-2 s on some filesystems) leave every mtime equal, and the change must still show.
-    ``skill_md facts`` is the dir's top-level SKILL.md ``(mtime_ns, size)`` via a follow-symlinks
-    stat — in-place edits change no directory fact, so the file itself must be in the signature.
-    ~1 ms for 170 dirs."""
+    """Append ``(dir, child dir names, skill_md facts)`` for *root* and the dirs below it the catalog
+    walks (``iter_skill_index_files``: no excluded dirs, no support dirs of a skill), depth-bounded.
+
+    Child names catch an install and an uninstall inside one coarse mtime tick (1-2 s on some
+    filesystems), so no directory needs an mtime of its own — that would be a stat per directory
+    saying only what the names already say. ``skill_md facts`` is the dir's top-level SKILL.md
+    ``(mtime_ns, size)`` via a follow-symlinks stat: an in-place edit changes no directory fact, so the
+    file itself must be in the signature. A root's own mtime is never recorded — it moves when Hermes
+    writes its metadata there (``.usage.json`` on every skill load), which must not invalidate the
+    scan it just used."""
     from agent.skill_utils import EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS
+    names, is_skill, skill_md_facts = [], False, None
     try:
-        mtime = os.stat(root).st_mtime_ns
         with os.scandir(root) as it:
-            entries = list(it)
+            for entry in it:
+                with suppress(OSError):
+                    if entry.is_dir():
+                        names.append(entry.name)
+                    elif entry.name == "SKILL.md":
+                        is_skill = True
+                        md_stat = entry.stat()  # follows symlinks: an edit at a linked target shows
+                        skill_md_facts = (md_stat.st_mtime_ns, md_stat.st_size)
     except OSError:
         return
-    names, is_skill, skill_md_facts = [], False, None
-    for entry in entries:
-        with suppress(OSError):
-            if entry.is_dir():
-                names.append(entry.name)
-            elif entry.name == "SKILL.md":
-                is_skill = True
-                md_stat = entry.stat()  # follows symlinks: an edit at a linked target shows
-                skill_md_facts = (md_stat.st_mtime_ns, md_stat.st_size)
     names.sort()
-    sig.append((str(root), mtime, tuple(names), skill_md_facts))
+    sig.append((str(root), tuple(names), skill_md_facts))
     if depth <= 0:
         return
     # A skill dir is a leaf (iter_skill_index_files semantics): the catalog only reads its
