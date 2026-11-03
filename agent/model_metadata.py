@@ -35,11 +35,6 @@ except Exception:
     def _list_providers():
         return []
 
-_PROVIDER_PREFIXES: frozenset[str] = frozenset(
-    value.lower()
-    for profile in _list_providers()
-    for value in (profile.name, *profile.aliases)
-)
 _OLLAMA_TAG_PATTERN = re.compile(r"^(\d+\.?\d*b|latest|stable|q\d|fp?\d|instruct|chat|coder|vision|text)", re.IGNORECASE)
 # Tailscale CGNAT (RFC 6598): `ipaddress.is_private` excludes it, yet Ollama
 # reached over Tailscale must count as local (timeout auto-bumps).
@@ -455,14 +450,27 @@ _URL_TO_PROVIDER: dict[str, str] = {
     "ollama.com": "ollama-cloud",
 }
 
-# Auto-extend with provider-profile hostnames not already mapped.
-try:
-    for _pp in _list_providers():
-        _host = _pp.get_hostname()
-        if _host and _host not in _URL_TO_PROVIDER:
-            _URL_TO_PROVIDER[_host] = _pp.name
-except Exception:
-    pass
+# Auto-extend with provider-profile hostnames not already mapped — on FIRST USE, never at
+# import. A profile's ``base_url`` may be a lazily-started adapter property with real side
+# effects (the muse-code plugin binds a loopback port on read), and this module is imported
+# transitively by the slash menu and by plugin tool registration: importing it must not start
+# anything, let alone wait on a port. ``_fill_provider_hosts`` is idempotent and reentrant-safe
+# (the flag flips before the loop, so a provider property that re-enters cannot recurse).
+_PROVIDER_HOSTS_FILLED = False
+
+
+def _fill_provider_hosts() -> None:
+    global _PROVIDER_HOSTS_FILLED
+    if _PROVIDER_HOSTS_FILLED:
+        return
+    _PROVIDER_HOSTS_FILLED = True
+    try:
+        for _pp in _list_providers():
+            _host = _pp.get_hostname()
+            if _host and _host not in _URL_TO_PROVIDER:
+                _URL_TO_PROVIDER[_host] = _pp.name
+    except Exception:
+        pass
 
 
 def _infer_provider_from_url(base_url: str) -> Optional[str]:
@@ -474,6 +482,7 @@ def _infer_provider_from_url(base_url: str) -> Optional[str]:
     from providers import profile_for_host
     if (profile := profile_for_host(host, metadata=True)) is not None:  # exact claims beat substring rows
         return profile.name
+    _fill_provider_hosts()
     for url_part, provider in _URL_TO_PROVIDER.items():
         if url_part in host:
             return provider

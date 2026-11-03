@@ -567,12 +567,13 @@ def resolve_pricing_provider(provider: str, *, base_url: str = "") -> str:
     if not base_url:
         return ""
     try:
-        from agent.model_metadata import _URL_TO_PROVIDER, _infer_provider_from_url
+        from agent.model_metadata import _URL_TO_PROVIDER, _fill_provider_hosts, _infer_provider_from_url
         from providers import get_provider_profile
         from utils import base_url_host_matches, base_url_hostname
 
         inferred = _infer_provider_from_url(base_url)
         profile = get_provider_profile(inferred) if inferred else None
+        _fill_provider_hosts()  # profile hostnames are lazy: never resolved at import
     except Exception:
         return ""
     # ``_infer_provider_from_url`` is deliberately broad for user-facing hints. Pricing is a
