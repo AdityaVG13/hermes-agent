@@ -63,8 +63,8 @@ def _profile_has_kanban_toolset(*, await_plugin_discovery: bool = True) -> bool:
 
         plugin_keys = None
         if not await_plugin_discovery:
-            from hermes_cli.plugins import get_plugin_toolset_keys_published
-            plugin_keys = get_plugin_toolset_keys_published() or set()
+            from hermes_cli.plugins import get_plugin_toolset_keys_nowait
+            plugin_keys = get_plugin_toolset_keys_nowait() or set()
         platforms = config.get("platform_toolsets") or {}
         return any(
             "kanban" in _get_platform_tools(config, platform, include_default_mcp_servers=False,
