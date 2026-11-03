@@ -308,6 +308,46 @@ def registry_generation() -> int:
     return _REGISTRY_GENERATION
 
 
+def declared_base_url_for(name: str) -> str:
+    """The profile's DECLARED endpoint, or "" when it has no profile.
+
+    The metadata view by contract: never starts a live accessor.
+    """
+    try:
+        profile = get_provider_profile(name)
+        if profile is None:
+            return ""
+        accessor = getattr(profile, "declared_base_url", None)
+        declared = accessor() if callable(accessor) else getattr(profile, "base_url", "")
+        return str(declared or "").strip().rstrip("/")
+    except Exception:
+        return ""
+
+
+def live_base_url_for(name: str) -> str:
+    """The profile's LIVE base URL for request resolvers, or "" when it declares no split.
+
+    ``declared_base_url`` is the metadata endpoint; a profile that overrides it is saying its
+    ``base_url`` accessor is an adapter — muse-code binds a loopback proxy that aliases the tool
+    names Meta refuses for subscription keys. A request runtime built from the declared row goes
+    straight to the vendor endpoint and comes back 403 client_attestation_denied on every request
+    that declares a tool, so both request resolvers ask for the live value here.
+    """
+    try:
+        from providers.base import ProviderProfile
+
+        profile = get_provider_profile(name)
+        if profile is None:
+            return ""
+        if type(profile).declared_base_url is ProviderProfile.declared_base_url:
+            return ""
+        live = str(getattr(profile, "base_url", "") or "").strip().rstrip("/")
+        declared = str(profile.declared_base_url() or "").strip().rstrip("/")
+        return live if live and live != declared else ""
+    except Exception:
+        return ""
+
+
 def bound_registry_key() -> tuple[str, int]:
     """``(bound home key, registry generation)`` after the periodic plugin-dir check.
 

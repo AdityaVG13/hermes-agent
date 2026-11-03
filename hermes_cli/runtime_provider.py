@@ -1041,6 +1041,36 @@ def _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url
                                             explicit_base_url=explicit_base_url), requested_provider)
 
 
+def _apply_live_profile_base_url(runtime: dict[str, Any], requested: Optional[str],
+                                 explicit_base_url: Optional[str]) -> dict[str, Any]:
+    """Point a split-profile runtime at its LIVE endpoint (``providers.live_base_url_for``).
+
+    Registry rows carry the DECLARED endpoint so metadata readers never start a live accessor.
+    Request runtimes must use ``base_url``: muse-code's accessor is a loopback proxy that aliases
+    the tool names Meta refuses for subscription keys, and a runtime built from the declared row
+    earns 403 client_attestation_denied on every request that declares a tool. An explicitly
+    requested endpoint, or a configured base URL that differs from the registry row, still wins —
+    only a value that merely echoes the declared endpoint is replaced.
+    """
+    if explicit_base_url:
+        return runtime
+    try:
+        from providers import declared_base_url_for, live_base_url_for
+
+        provider = str(runtime.get("provider") or requested or "")
+        live = live_base_url_for(provider)
+        if not live:
+            return runtime
+        current = str(runtime.get("base_url") or "").strip().rstrip("/")
+        declared = declared_base_url_for(provider)
+        if not current or current == declared:
+            runtime = dict(runtime)
+            runtime["base_url"] = live
+        return runtime
+    except Exception:
+        return runtime
+
+
 def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
                              explicit_base_url: Optional[str] = None, target_model: Optional[str] = None) -> dict[str, Any]:
     """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
@@ -1082,6 +1112,7 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
         logger.info("model.openai_runtime=codex_app_server overrides the %s runtime (source=%s); its credential/endpoint "
                     "is not used — the app-server authenticates with its own login", runtime.get("provider"), runtime.get("source"))
     runtime["api_mode"] = api_mode
+    runtime = _apply_live_profile_base_url(runtime, requested_provider, explicit_base_url)
     from hermes_cli.runtime_provider_missing_key import raise_if_declared_key_missing
     raise_if_declared_key_missing(requested_provider, runtime, _get_model_config(), _FROZEN_RUNTIME_CONFIG.get(),
                                   explicit_api_key=explicit_api_key)

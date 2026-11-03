@@ -5169,27 +5169,15 @@ def _api_key_profile_supplied_client(provider: str, **client_kwargs: Any) -> Any
 def _live_profile_base_url(provider: str) -> str:
     """The profile's LIVE base URL for request paths, or "" when it declares no split.
 
-    ``ProviderConfig.inference_base_url`` is the *declared* endpoint: registry rows are
-    metadata, rebuilt in every process that imports the terminal tooling, and must never
-    start a live accessor (see ``ProviderProfile.declared_base_url``). A profile that
-    overrides ``declared_base_url`` is saying its ``base_url`` accessor is an adapter —
-    muse-code binds a loopback proxy that aliases the tool names Meta refuses for
-    subscription keys. Building a request client from the registry row instead sends
-    that traffic straight to the vendor endpoint, which refuses it with
-    403 client_attestation_denied, so request paths re-resolve the live accessor here.
+    ``ProviderConfig.inference_base_url`` is the *declared* endpoint (registry rows are metadata
+    and must never start a live accessor — see ``providers.declared_base_url_for``). A profile
+    that overrides ``declared_base_url`` is saying its ``base_url`` accessor is an adapter, and
+    requests must go through it — see ``providers.live_base_url_for``.
     """
     try:
-        from providers import get_provider_profile
-        from providers.base import ProviderProfile
+        from providers import live_base_url_for
 
-        profile = get_provider_profile(provider)
-        if profile is None:
-            return ""
-        if type(profile).declared_base_url is ProviderProfile.declared_base_url:
-            return ""
-        live = str(getattr(profile, "base_url", "") or "").strip().rstrip("/")
-        declared = str(profile.declared_base_url() or "").strip().rstrip("/")
-        return live if live and live != declared else ""
+        return live_base_url_for(provider)
     except Exception:
         return ""
 
@@ -5214,9 +5202,13 @@ def _resolve_api_key_branch(req: _ResolveRequest, pconfig: Any, resolve_creds: C
         # Explicit callers still win, but a stored/registry base URL is the DECLARED
         # endpoint. A profile that declares a live/declared split owns its transport:
         # muse-code's accessor is a loopback adapter that aliases the tool names Meta
-        # refuses, so using the stored endpoint bypasses it and earns
-        # 403 client_attestation_denied on any request that declares tools.
-        raw_base_url = _live_profile_base_url(provider) or raw_base_url
+        # refuses, so sending the stored endpoint bypasses it and earns
+        # 403 client_attestation_denied on any request that declares tools. A base URL
+        # that differs from the declared row is a real override (env/config) and stands.
+        live = _live_profile_base_url(provider)
+        declared = str(getattr(pconfig, "inference_base_url", "") or "").strip().rstrip("/")
+        if live and (not raw_base_url or raw_base_url.rstrip("/") == declared):
+            raw_base_url = live
     if provider == "actual":
         with contextlib.suppress(Exception):
             from hermes_cli.auth import (

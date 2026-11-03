@@ -68,3 +68,45 @@ def test_a_raising_declared_url_never_breaks_resolution(monkeypatch):
     monkeypatch.setattr(providers, "get_provider_profile", lambda name: profile)
 
     assert _live_profile_base_url("adapter-test") == ""
+
+
+# --- the delegation / main-runtime resolver (``resolve_runtime_provider``) -------------------
+#
+# Subagents and the main agent build their client from the runtime dict, not from
+# ``resolve_provider_client``: if that dict echoes the declared endpoint, every delegated request
+# that declares a tool is refused with 403 client_attestation_denied.
+
+from hermes_cli.runtime_provider import _apply_live_profile_base_url
+
+
+def _split(monkeypatch):
+    monkeypatch.setattr(providers, "live_base_url_for", lambda name: _ADAPTER_URL)
+    monkeypatch.setattr(providers, "declared_base_url_for", lambda name: _DECLARED_URL)
+
+
+def test_runtime_uses_the_live_accessor_when_it_echoes_the_declared_row(monkeypatch):
+    _split(monkeypatch)
+    runtime = {"provider": "muse-code", "base_url": _DECLARED_URL}
+
+    fixed = _apply_live_profile_base_url(runtime, "muse-code", None)
+
+    assert fixed["base_url"] == _ADAPTER_URL
+    assert runtime["base_url"] == _DECLARED_URL, "the caller's snapshot must not be mutated in place"
+
+
+def test_runtime_keeps_a_configured_override(monkeypatch):
+    _split(monkeypatch)
+    runtime = {"provider": "muse-code", "base_url": "https://proxy.internal.example/v1"}
+
+    assert _apply_live_profile_base_url(runtime, "muse-code", None)["base_url"] == (
+        "https://proxy.internal.example/v1"
+    )
+
+
+def test_runtime_keeps_an_explicitly_requested_endpoint(monkeypatch):
+    _split(monkeypatch)
+    runtime = {"provider": "muse-code", "base_url": "https://payg.example.test/v1"}
+
+    assert _apply_live_profile_base_url(runtime, "muse-code", "https://payg.example.test/v1")[
+        "base_url"
+    ] == "https://payg.example.test/v1"
