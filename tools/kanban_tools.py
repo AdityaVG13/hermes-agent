@@ -34,7 +34,16 @@ KANBAN_LIST_MAX_LIMIT = 200
 
 # --- Gating ---
 
-def _profile_has_kanban_toolset() -> bool:
+def _profile_has_kanban_toolset(*, await_plugin_discovery: bool = True) -> bool:
+    """Whether this profile has the kanban toolset opted in.
+
+    ``await_plugin_discovery=False`` is for OFFER-TIME relevance gates (a skill's
+    ``environments: [kanban]`` line deciding whether a menu entry is worth showing). Resolving the
+    platform toolsets needs the plugin toolset keys, and the exhaustively correct lookup imports every
+    plugin — seconds on a large install. A gate that only reorders a menu must not pay that, so it
+    reads the published keys (live registry, else the last completed discovery's persisted set) and
+    a stale answer costs a menu entry, never a tool: schema assembly and ``check_fn`` keep the
+    default."""
     from tools.kanban_toolset_context import kanban_toolset_requested
 
     requested = kanban_toolset_requested()
@@ -52,9 +61,15 @@ def _profile_has_kanban_toolset() -> bool:
         # makes the playbook relevant; actual schemas still use the scope above.
         from hermes_cli.tools_config import _get_platform_tools
 
+        plugin_keys = None
+        if not await_plugin_discovery:
+            from hermes_cli.plugins import get_plugin_toolset_keys_published
+            plugin_keys = get_plugin_toolset_keys_published() or set()
         platforms = config.get("platform_toolsets") or {}
         return any(
-            "kanban" in _get_platform_tools(config, platform, include_default_mcp_servers=False)
+            "kanban" in _get_platform_tools(config, platform, include_default_mcp_servers=False,
+                                            plugin_toolset_keys=plugin_keys,
+                                            resolve_mcp_servers=await_plugin_discovery)
             for platform, names in platforms.items() if isinstance(names, list)
         )
     except Exception:

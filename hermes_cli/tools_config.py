@@ -568,8 +568,17 @@ def _platform_toolsets_explicitly_saved(config: dict, platform: str) -> bool:
     return isinstance(_coerce_platform_toolsets_value(raw, platform), list)
 
 
-def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_servers: bool = True) -> set[str]:
-    """Resolve which individual toolset names are enabled for a platform."""
+def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_servers: bool = True,
+                        plugin_toolset_keys: set | None = None,
+                        resolve_mcp_servers: bool = True) -> set[str]:
+    """Resolve which individual toolset names are enabled for a platform.
+
+    *plugin_toolset_keys*/*resolve_mcp_servers* are for OFFER-TIME relevance gates (a skill's
+    ``environments:`` line deciding whether a menu entry is worth showing). Both plugin keys and MCP
+    server names are resolved through helpers that fall back to plugin discovery, which imports every
+    enabled plugin — seconds on a large install. A gate that only reorders a menu passes the published
+    plugin keys and ``resolve_mcp_servers=False``, so it never imports a plugin or probes a server.
+    Tool-availability callers keep the defaults and stay exact."""
     platform_toolsets = config.get("platform_toolsets") or {}
     toolset_names = _coerce_platform_toolsets_value(platform_toolsets.get(platform), platform)
     # An explicitly saved list (even a composite like ``hermes-discord``) is an opt-in to the platform's
@@ -602,7 +611,7 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
     toolset_names = expanded
 
     configurable_keys = _configurable_keys()
-    plugin_ts_keys = _get_plugin_toolset_keys()
+    plugin_ts_keys = _get_plugin_toolset_keys() if plugin_toolset_keys is None else plugin_toolset_keys
     platform_default_keys = _platform_default_keys()
     # Plugin toolsets are first-class on a saved list: ``[hermes-cli, a2a]`` must survive filtering.
     # Plugin-provided toolsets are first-class on a platform-toolsets list — explicit config like
@@ -626,7 +635,10 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
 
     # Explicit non-configurable entries (custom toolsets, MCP server names) pass through.
     explicit_passthrough = {ts for ts in toolset_names if ts not in explicit_known_keys and ts not in platform_default_keys}
-    enabled_toolsets |= _merge_mcp_servers(config, toolset_names, explicit_passthrough, include_default_mcp_servers)
+    if resolve_mcp_servers:
+        enabled_toolsets |= _merge_mcp_servers(config, toolset_names, explicit_passthrough, include_default_mcp_servers)
+    else:
+        enabled_toolsets |= explicit_passthrough - {"no_mcp"}
 
     # Legacy profile opt-in is a fallback only. A saved platform list (even
     # empty) is authoritative, so a later disable cannot silently re-enable it.
