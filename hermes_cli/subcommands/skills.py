@@ -76,6 +76,14 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
         "check", help="Check installed hub skills for updates")
     skills_check.add_argument("name", nargs="?", help="Specific skill to check (default: all)")
 
+    skills_health = skills_subparsers.add_parser(
+        "health", help="Diagnose the skills library for hidden, orphaned, or stale state",
+        description="Read-only diagnosis: same-name duplicates that make skills "
+            "uninvocable, hub lock entries whose directory is truly missing, dead "
+            "symlinks, husk directories, and a catalog cache that disagrees with the "
+            "library. Exits non-zero when findings exist.")
+    add_json_flag(skills_health, "Output JSON instead of text (scripting-friendly)")
+
     skills_update = skills_subparsers.add_parser("update", help="Update installed hub skills")
     skills_update.add_argument(
         "name", nargs="?", help="Specific skill to update (default: all outdated skills)")

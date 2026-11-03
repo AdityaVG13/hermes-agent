@@ -16,6 +16,7 @@ from rich.table import Table
 
 # tools.skills_hub / tools.skills_guard are imported inside functions (cycles + startup cost).
 from hermes_constants import display_hermes_home
+from hermes_cli.skills_health import do_health
 
 _console = Console()
 
@@ -1550,6 +1551,7 @@ _CLI_ACTIONS = {
     "list": lambda a: do_list(source_filter=a.source,
                               enabled_only=getattr(a, "enabled_only", False)),
     "check": lambda a: do_check(name=getattr(a, "name", None)),
+    "health": lambda a: do_health(as_json=getattr(a, "json", False)),
     "update": lambda a: do_update(name=getattr(a, "name", None), force=getattr(a, "force", False)),
     "audit": lambda a: do_audit(name=getattr(a, "name", None), deep=getattr(a, "deep", False)),
     "uninstall": lambda a: do_uninstall(a.name, skip_confirm=getattr(a, "yes", False)),
@@ -1571,7 +1573,7 @@ def skills_command(args) -> Optional[int]:
     """Router for `hermes skills <subcommand>` — called from hermes_cli/main.py."""
     handler = _CLI_ACTIONS.get(getattr(args, "skills_action", None))
     if handler is None:
-        _console.print("Usage: hermes skills [browse|search|install|inspect|list|list-modified|diff|check|update|audit|uninstall|reset|opt-out|opt-in|publish|snapshot|tap]\n")
+        _console.print("Usage: hermes skills [browse|search|install|inspect|list|list-modified|diff|check|health|update|audit|uninstall|reset|opt-out|opt-in|publish|snapshot|tap]\n")
         _console.print("Run 'hermes skills <command> --help' for details.\n")
         return None
     # A handler reporting a real failure (install/update/uninstall's False) must exit non-zero: the
@@ -1650,6 +1652,7 @@ _SLASH_ACTIONS = {
         source_filter=_opt_value(args, "--source", "all"),
         enabled_only="--enabled-only" in args or "--enabled" in args, console=c),
     "check": lambda args, c: do_check(name=args[0] if args else None, console=c),
+    "health": lambda args, c: do_health(as_json="--json" in args, console=c),
     "update": lambda args, c: do_update(
         name=next((a for a in args if not a.startswith("--")), None), console=c,
         force="--force" in args),
