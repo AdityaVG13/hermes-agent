@@ -1558,7 +1558,7 @@ _CLI_ACTIONS = {
         if getattr(a, "fleet_action", None) == "manifest" else
         do_fleet_push(as_json=getattr(a, "json", False), stale=getattr(a, "stale", False),
                       names=getattr(a, "names", None), machines_filter=getattr(a, "machines", None),
-                      apply=getattr(a, "yes", False))
+                      apply=getattr(a, "yes", False), lossless=getattr(a, "lossless", False))
         if getattr(a, "fleet_action", None) == "push" else
         do_fleet_scan(as_json=getattr(a, "json", False), only=getattr(a, "only", None))),
     "update": lambda a: do_update(name=getattr(a, "name", None), force=getattr(a, "force", False)),
@@ -1670,7 +1670,7 @@ _SLASH_ACTIONS = {
                       stale="--stale" in args,
                       names=args[args.index("--names") + 1:] if "--names" in args else None,
                       machines_filter=args[args.index("--machines") + 1:] if "--machines" in args else None,
-                      apply="--yes" in args)
+                      apply="--yes" in args, lossless="--lossless" in args)
         if "push" in args else
         do_fleet_scan(as_json="--json" in args, console=c,
             only=args[args.index("--only") + 1:] if "--only" in args else None)),

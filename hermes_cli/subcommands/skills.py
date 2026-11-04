@@ -113,6 +113,9 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
         help="Restrict the push to these machine names")
     fleet_push.add_argument("--yes", action="store_true",
         help="Apply the plan (default: dry-run)")
+    fleet_push.add_argument("--lossless", action="store_true",
+        help="Also replace copies PROVEN lossless at push time: every line of the "
+             "satellite's SKILL.md exists in ours (fetched and verified, never trusted)")
     add_json_flag(fleet_push, "Output JSON instead of text (scripting-friendly)")
     fleet_manifest = fleet_sub.add_parser(
         "manifest", help="Re-snapshot this machine's skills as the push baseline",

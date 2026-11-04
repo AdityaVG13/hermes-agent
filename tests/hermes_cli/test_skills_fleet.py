@@ -515,7 +515,6 @@ def test_parse_write_output_global_lines_key_empty():
     st = sf.parse_write_output(b"FAILED setup extract\nOK plain\nDONE\n", expected={"plain"})
     assert st["plain"][0] == "OK"
     assert st[""][0] == "FAILED" and "extract" in st[""][1]
-    # without an expected set, behavior is unchanged (name = second token)
     st2 = sf.parse_write_output(b"FAILED setup extract\nDONE\n")
     assert st2["setup"][0] == "FAILED"
 
@@ -567,3 +566,88 @@ def test_manifest_refuses_empty_or_missing_root(tmp_path):
     import pytest as _pytest
     with _pytest.raises(ValueError, match="refusing"):
         sf.build_manifest(tmp_path / "nonexistent")
+
+
+# ── push: baseline history + lossless-subset proof ───────────────────────────
+
+def test_push_baseline_history_counts_prev_generation(local_root):
+    """A satellite copy matching a RECORDED prior generation (.prev) is
+    provably behind — generations, not just the latest baseline, testify."""
+    make_skill(local_root, "plain")
+    machines = [{"name": "sat", "host": "h", "root": "/s", "kind": "bash"}]
+    old_sha = sha_of(local_root / "plain" / "SKILL.md")
+    make_skill(local_root, "plain", content="body v2 — mac moved on")  # mac edits
+    new_sha = sha_of(local_root / "plain" / "SKILL.md")
+    assert new_sha != old_sha
+
+    def transport(machine, script, *, payload=None, entries=None, phase="scan"):
+        assert phase == "scan", "no proof phases in plain planning"
+        return f"plain|{old_sha}|plain\nDONE\n".encode()
+
+    gens = {"plain": {old_sha, new_sha}}
+    rep = sf.run_push(machines, local_root=local_root,
+                      selector=("stale", []), transport=transport,
+                      baseline={}, generations=gens)
+    m = rep["machines"]["sat"]
+    assert m["replace"] == ["plain"]
+    assert not m["refused"]
+
+
+def test_push_lossless_subset_allows_replace(local_root):
+    """--lossless: a satellite body whose every line exists in Mac's copy can
+    be replaced without losing satellite data — proven at push time by
+    fetching the body, never trusted from the plan."""
+    make_skill(local_root, "plain")
+    machines = [{"name": "sat", "host": "h", "root": "/s", "kind": "bash"}]
+    sat_sha = "f" * 64  # matches no recorded generation
+    mac_body = (local_root / "plain" / "SKILL.md").read_text()
+    subset = "\n".join(mac_body.splitlines()[:-1]) + "\n"  # drop one line
+
+    def transport(machine, script, *, payload=None, entries=None, phase="scan"):
+        if phase == "read":
+            return ("===BODY==plain\n" + subset + "===BODY==__END__\n").encode()
+        if phase == "write":
+            return b"OK plain\nDONE\n"
+        if phase == "verify":
+            return f"plain|{sha_of(local_root / 'plain' / 'SKILL.md')}|plain\nDONE\n".encode()
+        return f"plain|{sat_sha}|plain\nDONE\n".encode()
+
+    rep = sf.run_push(machines, local_root=local_root,
+                      selector=("names", ["plain"]), transport=transport,
+                      baseline={}, lossless=True, apply=True)
+    m = rep["machines"]["sat"]
+    assert m["replace"] == ["plain"], m
+    assert m.get("replace_reasons", {}).get("plain") == "lossless-subset"
+    assert m["applied"] == ["plain"] and m["verified"] == ["plain"]
+
+
+def test_push_lossless_refused_when_sat_has_unique_line(local_root):
+    """A satellite body holding even ONE line Mac lacks stays diverged —
+    --lossless proves safety, it never overrides evidence."""
+    make_skill(local_root, "plain")
+    machines = [{"name": "sat", "host": "h", "root": "/s", "kind": "bash"}]
+    sat_sha = "f" * 64
+    mac_body = (local_root / "plain" / "SKILL.md").read_text()
+    sat_body = mac_body + "spark-only lesson line\n"
+
+    def transport(machine, script, *, payload=None, entries=None, phase="scan"):
+        if phase == "read":
+            return ("===BODY==plain\n" + sat_body + "===BODY==__END__\n").encode()
+        return f"plain|{sat_sha}|plain\nDONE\n".encode()
+
+    rep = sf.run_push(machines, local_root=local_root,
+                      selector=("names", ["plain"]), transport=transport,
+                      baseline={}, lossless=True)
+    m = rep["machines"]["sat"]
+    assert m["replace"] == []
+    assert "plain" in m["refused"]
+    assert "unique" in m["refused"]["plain"]
+
+
+def test_parse_body_output_survives_done_inside_body():
+    """A body legitimately containing a bare DONE line must not truncate the
+    parse — markers delimit, there is no text sentinel in arbitrary markdown."""
+    raw = b"===BODY==a\nline1\nDONE\nline2\n===BODY==b\nplain body\n"
+    out = sf.parse_body_output(raw)
+    assert out["a"].splitlines() == ["line1", "DONE", "line2"]
+    assert out["b"].splitlines() == ["plain body"]

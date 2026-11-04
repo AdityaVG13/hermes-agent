@@ -325,6 +325,7 @@ def _ssh_transport(machine: dict, script: str, *, payload: Optional[bytes] = Non
     host = machine["host"]
     kind = machine["kind"]
     bundle_remote = entries_remote = ""
+    reads_stdout = False
     if phase == "write":
         if kind == "bash":
             script_remote = "/tmp/hermes-fleet-writer.sh"
@@ -340,6 +341,19 @@ def _ssh_transport(machine: dict, script: str, *, payload: Optional[bytes] = Non
             run = (f"powershell -NoProfile -ExecutionPolicy Bypass -File {script_remote}"
                    f" -Root {shlex.quote(machine['root'])} -Bundle {bundle_remote}"
                    f" -Entries {entries_remote} -Out {out_remote}")
+    elif phase == "read":
+        reads_stdout = True
+        if kind == "bash":
+            script_remote = "/tmp/hermes-fleet-reader.sh"
+            entries_remote = "/tmp/hermes-fleet-read-entries.txt"
+            run = (f"ROOT={_remote_path(machine['root'])} ENTRIES={entries_remote}"
+                   f" sh {script_remote}")
+        else:
+            script_remote = "AppData/Local/Temp/hermes-fleet-reader.ps1"
+            entries_remote = "AppData/Local/Temp/hermes-fleet-read-entries.txt"
+            run = (f"powershell -NoProfile -ExecutionPolicy Bypass -File {script_remote}"
+                   f" -Root {shlex.quote(machine['root'])} -Entries {entries_remote}")
+        out_remote = script_remote  # unused; bodies return on stdout
     elif kind == "bash":
         script_remote, out_remote = "/tmp/hermes-fleet-probe.sh", "/tmp/hermes-fleet-probe.out"
         run = f"sh {script_remote} {_remote_path(machine['root'])} {out_remote}"
@@ -383,6 +397,8 @@ def _ssh_transport(machine: dict, script: str, *, payload: Optional[bytes] = Non
         r = _ssh(run)
         if r.returncode != 0:
             raise RuntimeError(f"ssh: {phase} on {host} failed: {r.stderr.decode(errors='replace').strip()[:400]}")
+        if reads_stdout:
+            return r.stdout
         r = _scp(f"{host}:{out_remote}", local_out)
         if r.returncode != 0:
             raise RuntimeError(f"ssh: scp output from {host} failed: {r.stderr.decode(errors='replace').strip()}")
@@ -396,12 +412,17 @@ def _ssh_transport(machine: dict, script: str, *, payload: Optional[bytes] = Non
         pathlib.Path(local_entries).unlink(missing_ok=True) if local_entries else None
         if kind == "bash":
             _ssh(f"rm -f {script_remote} {out_remote}"
-                 + (f" {bundle_remote} {entries_remote}" if payload is not None else ""),
+                 + (f" {bundle_remote}" if payload is not None else "")
+                 + (f" {entries_remote}" if entries is not None else ""),
                  timeout=60)
         else:  # Windows ssh lands in cmd.exe — no rm; use PowerShell
-            remote_files = [script_remote, out_remote]
+            remote_files = [script_remote]
+            if not reads_stdout:
+                remote_files.append(out_remote)
             if payload is not None:
-                remote_files += [bundle_remote, entries_remote]
+                remote_files.append(bundle_remote)
+            if entries is not None:
+                remote_files.append(entries_remote)
             ps_list = ",".join(f"'{f}'" for f in remote_files)
             _ssh('powershell -NoProfile -Command "Remove-Item -Force '
                  f'-ErrorAction SilentlyContinue {ps_list}"',
@@ -464,15 +485,19 @@ def _is_category_target(rel: str, sat_paths: set[str]) -> bool:
 
 def plan_push(local_root, rows_by_machine: dict[str, Optional[list[FleetRow]]],
               machines: list[dict], baseline: dict[str, str],
-              selector: tuple[str, list[str]]) -> dict[str, Any]:
+              selector: tuple[str, list[str]],
+              generations: Optional[dict[str, set[str]]] = None) -> dict[str, Any]:
     """Decide per machine what a push would do, refusing everything risky.
 
     ``--stale`` semantics are evidence-based: a satellite copy may be REPLACED
-    only when its sha matches a RECORDED prior Mac generation (``baseline``,
-    the fleet manifest's SKILL.md hashes) — provably behind. Anything else
-    that differs is diverged-unknown and refused; owned names are refused
-    outright; creates refuse category-bucket targets and policy-absent names.
+    only when its sha matches a RECORDED prior Mac generation — ``generations``
+    (name → set of shas, normally every generation the fleet manifest kept)
+    or, absent that, the single ``baseline`` snapshot. Anything else that
+    differs is diverged-unknown and refused; owned names are refused outright;
+    creates refuse category-bucket targets and policy-absent names.
     """
+    gens = generations if generations is not None else {
+        n: {s} for n, s in baseline.items() if s}
     local = local_rows(local_root)
     refusals: list[str] = []
     local_twins = _twins(local)
@@ -520,7 +545,8 @@ def plan_push(local_root, rows_by_machine: dict[str, Optional[list[FleetRow]]],
             sat_by_name.setdefault(r.name, []).append(r)
 
         out: dict[str, Any] = {"create": [], "replace": [], "skip_identical": [],
-                               "refused": {}, "targets": {}, "new_shas": {}}
+                               "refused": {}, "targets": {}, "new_shas": {},
+                               "replace_reasons": {}}
         for n in universe:
             group = by_name.get(n)
             if not group:
@@ -556,10 +582,11 @@ def plan_push(local_root, rows_by_machine: dict[str, Optional[list[FleetRow]]],
                 out["refused"][n] = "owned by machine"
                 refusals.append(f"{mname}: {n} owned by machine — refusing")
                 continue
-            if sat.sha == baseline.get(n):
+            if sat.sha in gens.get(n, set()):
                 out["replace"].append(n)  # provably behind a recorded Mac generation
                 out["targets"][n] = sat.relpath  # replace in place, wherever it lives
                 out["new_shas"][n] = lrow.sha
+                out["replace_reasons"][n] = "behind (recorded generation)"
             else:
                 out["refused"][n] = "diverged (matches no recorded Mac generation)"
                 refusals.append(f"{mname}: {n} diverged — refusing")
@@ -723,10 +750,118 @@ def parse_write_output(raw: bytes, expected: Optional[set] = None) -> dict[str, 
     return out
 
 
+def render_bash_reader() -> str:
+    """Read-phase script: marker-delimited SKILL.md bodies for the names the
+    plan refused as diverged — the lossless proof fetches evidence, never
+    trusts the plan. ``$ROOT``/``$ENTRIES`` come from the transport."""
+    return r'''
+while IFS='|' read -r n rel || [ -n "$n" ]; do
+  [ -n "$n" ] || continue
+  echo "===BODY==$n"
+  cat "$ROOT/$rel/SKILL.md" 2>/dev/null
+  echo
+done < "$ENTRIES"
+echo "DONE"
+'''
+
+
+def render_ps_reader() -> str:
+    return """param([string]$Root, [string]$Entries)
+foreach ($line in Get-Content -LiteralPath $Entries) {
+    if (-not $line.Trim()) { continue }
+    $n, $rel = $line.Split('|', 2)
+    Write-Output ("===BODY==" + $n)
+    try { Get-Content -Raw -LiteralPath (Join-Path $Root ($rel -replace '/', '\\')) } catch {}
+    Write-Output ""
+}
+Write-Output "DONE"
+"""
+
+
+def parse_body_output(raw: bytes) -> dict[str, str]:
+    """``===BODY==name`` delimited bodies → {name: body}. Markers delimit;
+    there is NO text sentinel — bodies are arbitrary markdown that may
+    legitimately contain a bare ``DONE`` line."""
+    out: dict[str, str] = {}
+    cur, buf = None, []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        if line.startswith("===BODY=="):
+            if cur is not None:
+                out[cur] = "\n".join(buf).replace("\r", "")
+            cur, buf = line[len("===BODY=="):].strip(), []
+        else:
+            buf.append(line)
+    if cur is not None:
+        out[cur] = "\n".join(buf).replace("\r", "")
+    return out
+
+
+def _lossless_pass(report: dict[str, Any], machines: list[dict],
+                   local_paths: dict[str, str], transport) -> None:
+    """Upgrade ``diverged`` refusals the satellite BODY disproves: if every
+    line of the satellite's SKILL.md exists in Mac's copy, replacement cannot
+    lose satellite data — move it to replace with reason ``lossless-subset``.
+    One unique satellite line keeps it refused."""
+    for machine in machines:
+        mname, kind = machine.get("name", "?"), machine.get("kind", "")
+        m = report["machines"].get(mname)
+        if not m or "error" in m:
+            continue
+        diverged = [n for n, why in m["refused"].items()
+                    if "matches no recorded Mac generation" in why]
+        if not diverged:
+            continue
+        rows = {r.name: r for r in (report.get("_rows", {}).get(mname) or [])}
+        wanted = [n for n in diverged if n in rows]
+        if not wanted:
+            continue
+        entries = "\n".join(f"{n}|{rows[n].relpath}" for n in wanted) + "\n"
+        script = render_ps_reader() if kind == "powershell" else render_bash_reader()
+        try:
+            raw = transport(machine, script, phase="read", entries=entries.encode())
+        except Exception as exc:
+            report["refusals"].append(f"{mname}: lossless read failed: {exc}")
+            continue
+        bodies = parse_body_output(raw)
+        for n in diverged:
+            body = bodies.get(n, "")
+            if not body.strip():
+                continue
+            try:
+                mac_text = open(os.path.join(local_paths[n], "SKILL.md"),
+                                encoding="utf-8", errors="replace").read()
+            except OSError:
+                continue
+            sat_lines = set(body.rstrip("\n").split("\n"))
+            mac_lines = set(mac_text.replace("\r\n", "\n").rstrip("\n").split("\n"))
+            if sat_lines - mac_lines:
+                m["refused"][n] = "diverged (satellite holds unique lines)"
+                continue
+            del m["refused"][n]
+            report["refusals"] = [r for r in report["refusals"]
+                                  if r != f"{mname}: {n} diverged — refusing"]
+            m["replace"].append(n)
+            m["targets"][n] = rows[n].relpath
+            m["new_shas"][n] = sf_sha_of_file(os.path.join(local_paths[n], "SKILL.md"))
+            m["replace_reasons"][n] = "lossless-subset"
+    report["ok"] = not report["refusals"] and not any(
+        "error" in m for m in report["machines"].values())
+
+
+def sf_sha_of_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def run_push(machines: list[dict], local_root=None, transport=None,
              baseline: Optional[dict[str, str]] = None,
              selector: tuple[str, list[str]] = ("stale", []),
-             apply: bool = False) -> dict[str, Any]:
+             apply: bool = False,
+             generations: Optional[dict[str, set[str]]] = None,
+             lossless: bool = False) -> dict[str, Any]:
     """Scan → plan → (apply: bundle + write + post-verify). Without ``apply``
     the transport only ever sees read-only probe traffic."""
     if local_root is None:
@@ -742,11 +877,16 @@ def run_push(machines: list[dict], local_root=None, transport=None,
     rows_in: dict[str, Optional[list[FleetRow]]] = dict(rows_by_machine)
     for name, err in errors.items():
         rows_in[name] = None
-    plan = plan_push(local_root, rows_in, machines, baseline or {}, selector)
+    plan = plan_push(local_root, rows_in, machines, baseline or {}, selector,
+                     generations=generations)
     report: dict[str, Any] = {**plan, "applied": False}
+    if lossless:
+        report["_rows"] = rows_by_machine
+        _lossless_pass(report, machines, local_paths, transport)
+        report.pop("_rows", None)
 
     if not apply:
-        report["ok"] = bool(plan["ok"])
+        report["ok"] = bool(report.get("ok"))
         return report
     report["applied"] = True
 
@@ -839,6 +979,38 @@ def _load_baseline(path=None) -> dict[str, str]:
             if name and sha:
                 out[name] = sha
     return out
+
+
+def _load_generations(path=None) -> dict[str, set[str]]:
+    """name → every recorded SKILL.md sha across the manifest's kept
+    generations (current + ``.prev``). The honest behind-test evidence: a
+    satellite matching ANY recorded generation is provably behind, not
+    diverged-unknown."""
+    import json
+    if path is None:
+        path = _baseline_path()
+    gens: dict[str, set[str]] = {}
+    for candidate in (path, str(path) + ".prev"):
+        try:
+            data = json.loads(open(candidate, encoding="utf-8").read())
+        except (OSError, ValueError):
+            continue
+        skills = data.get("skills") or {}
+        if isinstance(skills, dict):
+            items = list(skills.items())
+        else:
+            items = []
+            for e in skills:
+                if isinstance(e, dict):
+                    items.append((e.get("name"), e))
+                elif isinstance(e, (list, tuple)) and len(e) == 2 and isinstance(e[1], dict):
+                    items.append((e[0], e[1]))
+        for name, entry in items:
+            if isinstance(entry, dict):
+                sha = (entry.get("files") or {}).get("SKILL.md")
+                if name and sha:
+                    gens.setdefault(name, set()).add(sha)
+    return gens
 
 
 def _baseline_path() -> str:
@@ -942,7 +1114,8 @@ def do_fleet_manifest(path: Optional[str] = None, as_json: bool = False,
 
 def do_fleet_push(as_json: bool = False, stale: bool = False,
                   names: Optional[list[str]] = None, machines_filter: Optional[list[str]] = None,
-                  apply: bool = False, console: Optional[Any] = None) -> Optional[bool]:
+                  apply: bool = False, lossless: bool = False,
+                  console: Optional[Any] = None) -> Optional[bool]:
     """CLI entry: ``hermes skills fleet push``. Dry-run by default; writes
     only with ``--yes``. Returns False on any refusal or failed entry."""
     if not stale and not names:
@@ -955,7 +1128,8 @@ def do_fleet_push(as_json: bool = False, stale: bool = False,
     baseline = _load_baseline()
     report = run_push(machines, baseline=baseline,
                       selector=("stale", []) if stale else ("names", list(names or [])),
-                      apply=apply)
+                      apply=apply, generations=_load_generations(),
+                      lossless=lossless)
     if apply and report.get("applied") and any(
             m.get("verified") for m in report["machines"].values()
             if isinstance(m, dict)):
