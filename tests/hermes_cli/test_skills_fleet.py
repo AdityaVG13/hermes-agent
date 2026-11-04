@@ -294,3 +294,227 @@ def test_run_scan_rejects_unknown_kind(local_root):
     machines = [{"name": "odd", "host": "h", "root": "/s", "kind": "telnet"}]
     rep = sf.run_scan(machines, transport=FakeTransport({}), local_root=local_root)
     assert "unsupported kind" in rep["machines"]["odd"]["error"]
+
+
+# ── push: selection + refusal classes ────────────────────────────────────────
+
+def _machine(name="sat", **kw):
+    m = {"name": name, "host": f"{name}-host", "root": f"/srv/{name}/skills", "kind": "bash"}
+    m.update(kw)
+    return m
+
+
+def test_push_plan_marks_missing_create_and_identical_skip(local_root):
+    make_skill(local_root, "a")
+    make_skill(local_root, "b")
+    sha_a = sha_of(local_root / "a" / "SKILL.md")
+    rows = [_row("a", sha_a, "a")]  # b missing on satellite
+    plan = sf.plan_push(local_root, {"sat": rows}, machines=[_machine()], baseline={},
+                        selector=("stale", []))
+    m = plan["machines"]["sat"]
+    assert m["create"] == ["b"]
+    assert m["skip_identical"] == ["a"]
+    assert plan["ok"] and not plan["refusals"]
+
+
+def test_push_stale_requires_baseline_proof_of_behind(local_root):
+    """--stale replaces a satellite copy only when its sha matches a RECORDED
+    prior Mac generation: sat == baseline != current is provably behind; a
+    satellite sha matching nothing is diverged-unknown and must be refused."""
+    make_skill(local_root, "s", content="new mac body")
+    old_sha, foreign_sha = "0" * 64, "f" * 64
+    plan = sf.plan_push(local_root, {"sat": [_row("s", old_sha, "s")]},
+                        machines=[_machine()], baseline={"s": old_sha},
+                        selector=("stale", []))
+    assert plan["machines"]["sat"]["replace"] == ["s"]
+    plan2 = sf.plan_push(local_root, {"sat": [_row("s", foreign_sha, "s")]},
+                         machines=[_machine()], baseline={"s": old_sha},
+                         selector=("stale", []))
+    assert plan2["machines"]["sat"]["replace"] == []
+    assert any("diverged" in r for r in plan2["refusals"])
+    assert not plan2["ok"]
+
+
+def test_push_refuses_owned_names(local_root):
+    make_skill(local_root, "ferrum-build")
+    rows = [_row("ferrum-build", "0" * 64, "ferrum-build")]
+    plan = sf.plan_push(local_root, {"sat": rows},
+                        machines=[_machine(owned=["ferrum-build"])],
+                        baseline={"ferrum-build": "0" * 64}, selector=("stale", []))
+    assert plan["machines"]["sat"]["replace"] == []
+    assert any("owned" in r for r in plan["refusals"]) and not plan["ok"]
+
+
+def test_push_refuses_policy_missing_and_twin_and_symlink_skills(local_root):
+    make_skill(local_root, "by-policy", content="x")     # allowed_missing on machine
+    make_skill(local_root, "twin", name="t")             # local twin → name unpushable
+    make_skill(local_root, "cat/twin", name="t")
+    outside = local_root.parent / "else"
+    make_skill(outside, "linked")                        # symlinked skill dir → refuse
+    (local_root / "linked").symlink_to(outside / "linked", target_is_directory=True)
+    plan = sf.plan_push(local_root, {"sat": []},
+                        machines=[_machine(allow_missing=["by-policy"])],
+                        baseline={}, selector=("stale", []))
+    m = plan["machines"]["sat"]
+    assert m["create"] == []
+    reasons = " ".join(plan["refusals"])
+    assert "twin" in reasons and "symlink" in reasons
+
+
+def test_push_refuses_category_bucket_targets(local_root):
+    """A create whose target relpath lands on a satellite dir that already
+    holds other skills (a category) must refuse — the research-husk hazard."""
+    make_skill(local_root, "ghost")                       # plain create
+    make_skill(local_root, "inner")                       # plain create
+    # local skill 'holder' sits at relpath 'holder', which on the satellite is
+    # a CATEGORY (resident lives at holder/resident) → create must refuse
+    make_skill(local_root, "holder", name="x-holder")
+    rows = [_row("resident", "a" * 64, "holder/resident")]
+    plan = sf.plan_push(local_root, {"sat": rows}, machines=[_machine()], baseline={},
+                        selector=("stale", []))
+    m = plan["machines"]["sat"]
+    assert "ghost" in m["create"] and "inner" in m["create"]
+    assert "x-holder" not in m["create"]
+    assert any("x-holder" in r and "category" in r for r in plan["refusals"])
+
+
+def test_push_refuses_unsafe_roots_and_absent_local_names(local_root):
+    make_skill(local_root, "real")
+    plan = sf.plan_push(local_root, {"sat": []},
+                        machines=[_machine(name="dot", root="."),
+                                  _machine(name="slash", root="/"),
+                                  _machine(name="tilde", root="~")],
+                        baseline={}, selector=("names", ["nope"]))
+    reasons = " ".join(plan["refusals"])
+    assert "unsafe root" in reasons
+    assert any("nope" in r and "not local" in r for r in plan["refusals"])
+
+
+def test_push_machine_probe_error_skips_machine(local_root):
+    make_skill(local_root, "a")
+    plan = sf.plan_push(local_root, {"sat": None}, machines=[_machine()], baseline={},
+                        selector=("stale", []))
+    assert "error" in plan["machines"]["sat"]
+    assert not plan["ok"]
+
+
+def test_push_any_diverged_twin_refuses_everything(local_root):
+    make_skill(local_root, "d1", name="dup", content="one")
+    make_skill(local_root, "d2", name="dup", content="two")
+    plan = sf.plan_push(local_root, {"sat": []}, machines=[_machine()], baseline={},
+                        selector=("stale", []))
+    assert plan["machines"]["sat"]["create"] == []
+    assert any("diverged twin" in r for r in plan["refusals"]) and not plan["ok"]
+
+
+# ── push: bundle + transport protocol ────────────────────────────────────────
+
+def test_build_bundle_clean_members_only(local_root):
+    import io
+    import tarfile
+    make_skill(local_root, "plain")
+    (local_root / "plain" / "refs").mkdir()
+    (local_root / "plain" / "refs" / "doc.md").write_text("doc")
+    (local_root / "plain" / "._junk").write_bytes(b"\x00junk")
+    (local_root / "plain" / ".DS_Store").write_bytes(b"finder")
+    (local_root / "plain" / "refs" / "link.md").symlink_to("../SKILL.md")
+    with pytest.raises(ValueError, match="symlink"):
+        sf.build_bundle({"plain": local_root / "plain"})
+    (local_root / "plain" / "refs" / "link.md").unlink()
+    blob = sf.build_bundle({"plain": local_root / "plain"})
+    tf = tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz")
+    members = tf.getnames()
+    assert all(m == "plain" or m.startswith("plain/") for m in members)
+    assert not any("/._" in m or m.endswith(".DS_Store") or ".." in m.split("/") for m in members)
+    assert any(m == "plain/SKILL.md" for m in members)
+
+
+def test_push_dry_run_never_writes(local_root):
+    make_skill(local_root, "plain")
+    calls: list[str] = []
+
+    def transport(machine, script, *, payload=None, entries=None, phase="scan"):
+        calls.append(phase)
+        return b"DONE\n"
+
+    rep = sf.run_push([_machine()], local_root=local_root, transport=transport,
+                      baseline={}, selector=("stale", []), apply=False)
+    assert rep["machines"]["sat"]["create"] == ["plain"]
+    assert calls == ["scan"], "dry-run must not ship payloads"
+    assert not rep.get("applied")
+
+
+def test_push_apply_roundtrip_and_postverify(local_root):
+    make_skill(local_root, "plain")
+    sha = sha_of(local_root / "plain" / "SKILL.md")
+    calls: list[str] = []
+
+    def transport(machine, script, *, payload=None, entries=None, phase="scan"):
+        calls.append(phase)
+        if phase == "verify":
+            return (f"plain|{sha}|plain\nDONE\n").encode()
+        if phase == "write":
+            return b"OK plain\nDONE\n"
+        return b"DONE\n"  # scan: satellite has nothing → create
+
+    rep = sf.run_push([_machine()], local_root=local_root, transport=transport,
+                      baseline={}, selector=("stale", []), apply=True)
+    assert calls == ["scan", "write", "verify"]
+    assert rep["machines"]["sat"]["applied"] == ["plain"]
+    assert rep["machines"]["sat"]["verified"] == ["plain"]
+    assert rep["ok"]
+
+
+def test_push_write_refusal_or_failure_surfaces(local_root):
+    make_skill(local_root, "plain")
+
+    def transport(machine, script, *, payload=None, entries=None, phase="scan"):
+        if phase == "write":
+            return b"REFUSED plain category-target\nDONE\n"
+        if phase == "verify":
+            return (f"plain|{'0' * 64}|plain\nDONE\n")  # still old
+        return b"DONE\n"
+
+    rep = sf.run_push([_machine()], local_root=local_root, transport=transport,
+                      baseline={}, selector=("stale", []), apply=True)
+    m = rep["machines"]["sat"]
+    assert m["remote_refused"] == ["plain"]
+    assert "plain" not in m["verified"]
+    assert not rep["ok"]
+
+
+def test_push_global_writer_failure_fails_the_machine(local_root):
+    """A setup-level writer failure (extract dies, staging dir illegal on
+    NTFS, …) carries NO skill name — it must fail the whole machine's write
+    and ok, never pass as 'nothing to do'."""
+    make_skill(local_root, "plain")
+
+    def transport(machine, script, *, payload=None, entries=None, phase="scan"):
+        if phase == "write":
+            return b"FAILED setup extract\nDONE\n"
+        return b"DONE\n"
+
+    rep = sf.run_push([_machine()], local_root=local_root, transport=transport,
+                      baseline={}, selector=("stale", []), apply=True)
+    m = rep["machines"]["sat"]
+    assert m["applied"] == [] and m["verified"] == []
+    assert m["remote_failed"] == ["plain"]
+    assert any("globally" in r for r in rep["refusals"])
+    assert not rep["ok"]
+
+
+def test_ps_writer_stage_dir_is_ntfs_legal():
+    """The literal '<pid>' staging name is illegal on NTFS — New-Item fails and
+    every extract 'fails' with no visible cause (live Windows, 2026-11-03)."""
+    script = sf.render_ps_writer()
+    assert '"$PID"' in script or '$PID"' in script or ".fleet-stage-$PID" in script
+    assert "<pid>" not in script
+
+
+def test_parse_write_output_global_lines_key_empty():
+    st = sf.parse_write_output(b"FAILED setup extract\nOK plain\nDONE\n", expected={"plain"})
+    assert st["plain"][0] == "OK"
+    assert st[""][0] == "FAILED" and "extract" in st[""][1]
+    # without an expected set, behavior is unchanged (name = second token)
+    st2 = sf.parse_write_output(b"FAILED setup extract\nDONE\n")
+    assert st2["setup"][0] == "FAILED"

@@ -289,7 +289,7 @@ def classify(local: list[FleetRow], machines: dict[str, list[FleetRow]],
 
 # ── orchestration ────────────────────────────────────────────────────────────
 
-Transport = Callable[[dict, str], bytes]
+Transport = Callable[..., bytes]
 _SSH_TIMEOUT = 600
 
 
@@ -303,22 +303,44 @@ def _remote_path(root: str) -> str:
     return shlex.quote(root)
 
 
-def _ssh_transport(machine: dict, script: str) -> bytes:
+def _ssh_transport(machine: dict, script: str, *, payload: Optional[bytes] = None,
+                   entries: Optional[bytes] = None, phase: str = "scan") -> bytes:
     """Ship the generated script as a file (never inline over ssh — quoting
-    corruption ate two fleet probes), run it, pull the rows back."""
+    corruption ate two fleet probes), run it, pull the rows back.
+
+    ``phase="write"`` additionally ships ``payload`` (the bundle tgz) and
+    ``aux["entries"]`` (the per-skill manifest) and returns the writer's
+    status stream instead of probe rows."""
     import shlex
     import subprocess
     import tempfile
+    import pathlib
     host = machine["host"]
     kind = machine["kind"]
-    if kind == "bash":
-        local_ext, remote_script, remote_out = ".sh", "/tmp/hermes-fleet-probe.sh", "/tmp/hermes-fleet-probe.out"
-        run = f"sh {remote_script} {_remote_path(machine['root'])} {remote_out}"
+    bundle_remote = entries_remote = ""
+    if phase == "write":
+        if kind == "bash":
+            script_remote = "/tmp/hermes-fleet-writer.sh"
+            entries_remote, bundle_remote = "/tmp/hermes-fleet-entries.txt", "/tmp/hermes-fleet-bundle.tgz"
+            out_remote = "/tmp/hermes-fleet-write.out"
+            run = (f"sh {script_remote} {_remote_path(machine['root'])} {bundle_remote} "
+                   f"{entries_remote} {out_remote}")
+        else:
+            script_remote = "AppData/Local/Temp/hermes-fleet-writer.ps1"
+            entries_remote = "AppData/Local/Temp/hermes-fleet-entries.txt"
+            bundle_remote = "AppData/Local/Temp/hermes-fleet-bundle.tgz"
+            out_remote = "AppData/Local/Temp/hermes-fleet-write.out"
+            run = (f"powershell -NoProfile -ExecutionPolicy Bypass -File {script_remote}"
+                   f" -Root {shlex.quote(machine['root'])} -Bundle {bundle_remote}"
+                   f" -Entries {entries_remote} -Out {out_remote}")
+    elif kind == "bash":
+        script_remote, out_remote = "/tmp/hermes-fleet-probe.sh", "/tmp/hermes-fleet-probe.out"
+        run = f"sh {script_remote} {_remote_path(machine['root'])} {out_remote}"
     else:
-        local_ext, remote_script = ".ps1", "AppData/Local/Temp/hermes-fleet-probe.ps1"
-        remote_out = "AppData/Local/Temp/hermes-fleet-probe.out"
-        run = (f"powershell -NoProfile -ExecutionPolicy Bypass -File {remote_script}"
-               f" -Root {shlex.quote(machine['root'])} -Out {remote_out}")
+        script_remote = "AppData/Local/Temp/hermes-fleet-probe.ps1"
+        out_remote = "AppData/Local/Temp/hermes-fleet-probe.out"
+        run = (f"powershell -NoProfile -ExecutionPolicy Bypass -File {script_remote}"
+               f" -Root {shlex.quote(machine['root'])} -Out {out_remote}")
 
     def _ssh(cmd: str, timeout: int = _SSH_TIMEOUT) -> subprocess.CompletedProcess:
         return subprocess.run(["ssh", "-n", host, cmd], capture_output=True,
@@ -328,27 +350,55 @@ def _ssh_transport(machine: dict, script: str) -> bytes:
         return subprocess.run(["scp", "-q", src, dst], capture_output=True,
                               timeout=120, check=False)
 
-    with tempfile.NamedTemporaryFile("w", suffix=local_ext, delete=False,
+    ext = ".sh" if kind == "bash" else ".ps1"
+    with tempfile.NamedTemporaryFile("w", suffix=ext, delete=False,
                                      encoding="utf-8", newline="\n") as fh:
         fh.write(script)
         local_script = fh.name
-    import pathlib
     local_out = local_script + ".out"
+    files: list[tuple[str, str]] = [(local_script, f"{host}:{script_remote}")]
+    local_bundle = local_entries = None
+    if payload is not None:
+        import pathlib as _p
+        local_bundle = local_script + ".tgz"
+        _p.Path(local_bundle).write_bytes(payload)
+        files.append((local_bundle, f"{host}:{bundle_remote}"))
+    if entries is not None:
+        import pathlib as _p
+        local_entries = local_script + ".entries"
+        _p.Path(local_entries).write_bytes(entries)
+        files.append((local_entries, f"{host}:{entries_remote}"))
     try:
-        r = _scp(local_script, f"{host}:{remote_script}")
-        if r.returncode != 0:
-            raise RuntimeError(f"ssh: scp script to {host} failed: {r.stderr.decode(errors='replace').strip()}")
+        for src, dst in files:
+            r = _scp(src, dst)
+            if r.returncode != 0:
+                raise RuntimeError(f"ssh: scp to {host} failed: {r.stderr.decode(errors='replace').strip()}")
         r = _ssh(run)
         if r.returncode != 0:
-            raise RuntimeError(f"ssh: probe on {host} failed: {r.stderr.decode(errors='replace').strip()[:400]}")
-        r = _scp(f"{host}:{remote_out}", local_out)
+            raise RuntimeError(f"ssh: {phase} on {host} failed: {r.stderr.decode(errors='replace').strip()[:400]}")
+        r = _scp(f"{host}:{out_remote}", local_out)
         if r.returncode != 0:
-            raise RuntimeError(f"ssh: scp rows from {host} failed: {r.stderr.decode(errors='replace').strip()}")
+            raise RuntimeError(f"ssh: scp output from {host} failed: {r.stderr.decode(errors='replace').strip()}")
+        import pathlib
         return pathlib.Path(local_out).read_bytes()
     finally:
+        import pathlib
         pathlib.Path(local_script).unlink(missing_ok=True)
         pathlib.Path(local_out).unlink(missing_ok=True)
-        _ssh(f"rm -f {remote_script} {remote_out}", timeout=60)
+        pathlib.Path(local_bundle).unlink(missing_ok=True) if local_bundle else None
+        pathlib.Path(local_entries).unlink(missing_ok=True) if local_entries else None
+        if kind == "bash":
+            _ssh(f"rm -f {script_remote} {out_remote}"
+                 + (f" {bundle_remote} {entries_remote}" if payload is not None else ""),
+                 timeout=60)
+        else:  # Windows ssh lands in cmd.exe — no rm; use PowerShell
+            remote_files = [script_remote, out_remote]
+            if payload is not None:
+                remote_files += [bundle_remote, entries_remote]
+            ps_list = ",".join(f"'{f}'" for f in remote_files)
+            _ssh('powershell -NoProfile -Command "Remove-Item -Force '
+                 f'-ErrorAction SilentlyContinue {ps_list}"',
+                 timeout=60)
 
 
 def run_scan(machines: list[dict], transport: Optional[Transport] = None,
@@ -362,6 +412,20 @@ def run_scan(machines: list[dict], transport: Optional[Transport] = None,
     transport = transport or _ssh_transport
     local = local_rows(local_root)
 
+    rows_by_machine, errors = _probe_machines(machines, transport)
+    allowed = {m["name"]: set(m.get("allow_missing", ())) for m in machines if "name" in m}
+    report = classify(local, rows_by_machine, allowed_missing=allowed)
+    for name, err in errors.items():
+        report["machines"][name] = {"error": err}
+    report["ok"] = bool(report["ok"]) and not errors
+    report["local_counts"] = {"rows": len(local), "names": len({r.name for r in local})}
+    return report
+
+
+def _probe_machines(machines: list[dict], transport: Transport
+                    ) -> tuple[dict[str, list[FleetRow]], dict[str, str]]:
+    """Run the read-only probe on every machine. Returns (rows, errors); a
+    machine in ``errors`` is absent from ``rows`` and vice versa."""
     rows_by_machine: dict[str, list[FleetRow]] = {}
     errors: dict[str, str] = {}
     for machine in machines:
@@ -374,14 +438,442 @@ def run_scan(machines: list[dict], transport: Optional[Transport] = None,
             rows_by_machine[name] = parse_probe_output(transport(machine, script))
         except Exception as exc:  # transport failures must not sink the fleet
             errors[name] = str(exc) or exc.__class__.__name__
+    return rows_by_machine, errors
 
-    allowed = {m["name"]: set(m.get("allow_missing", ())) for m in machines if "name" in m}
-    report = classify(local, rows_by_machine, allowed_missing=allowed)
+
+# ── push: plan, bundle, write protocol ───────────────────────────────────────
+
+def _unsafe_root(root: str) -> bool:
+    """A machine root that resolves to a filesystem root, the home dir itself,
+    or emptiness — writing there is the rmtree-the-world hazard, refused."""
+    return str(root).strip().rstrip("/") in ("", ".", "/", "~")
+
+
+def _is_category_target(rel: str, sat_paths: set[str]) -> bool:
+    """True when ``rel`` would land on a satellite dir that already holds
+    other skills — creating there nests skills under a future leaf."""
+    return any(p.startswith(rel + "/") for p in sat_paths)
+
+
+def plan_push(local_root, rows_by_machine: dict[str, Optional[list[FleetRow]]],
+              machines: list[dict], baseline: dict[str, str],
+              selector: tuple[str, list[str]]) -> dict[str, Any]:
+    """Decide per machine what a push would do, refusing everything risky.
+
+    ``--stale`` semantics are evidence-based: a satellite copy may be REPLACED
+    only when its sha matches a RECORDED prior Mac generation (``baseline``,
+    the fleet manifest's SKILL.md hashes) — provably behind. Anything else
+    that differs is diverged-unknown and refused; owned names are refused
+    outright; creates refuse category-bucket targets and policy-absent names.
+    """
+    local = local_rows(local_root)
+    refusals: list[str] = []
+    local_twins = _twins(local)
+    if local_twins["diverged"]:
+        names = ", ".join(sorted(local_twins["diverged"]))
+        refusals.append(f"local: diverged twin(s) {names} — push refused")
+
+    by_name: dict[str, list[FleetRow]] = {}
+    for r in local:
+        by_name.setdefault(r.name, []).append(r)
+    twin_names = set(local_twins["benign"]) | set(local_twins["diverged"])
+    symlink_names = {r.name for r in local if r.symlink}
+
+    mode, names = selector
+    if mode == "names":
+        universe = list(dict.fromkeys(names))
+        for n in universe:
+            if n not in by_name:
+                refusals.append(f"{n}: not local")
+    else:
+        universe = sorted(by_name)
+
+    plan: dict[str, Any] = {"machines": {}, "refusals": refusals}
+    errors_present = False
+    for machine in machines:
+        mname = machine.get("name", "?")
+        root = str(machine.get("root", ""))
+        if _unsafe_root(root):
+            refusals.append(f"{mname}: unsafe root {root!r}")
+            plan["machines"][mname] = {"error": "unsafe root"}
+            errors_present = True
+            continue
+        rows = rows_by_machine.get(mname)
+        if rows is None:
+            refusals.append(f"{mname}: machine unreachable")
+            plan["machines"][mname] = {"error": "probe failed"}
+            errors_present = True
+            continue
+
+        owned = set(machine.get("owned", ()))
+        allow_missing = set(machine.get("allow_missing", ()))
+        sat_paths = {r.relpath for r in rows}
+        sat_by_name: dict[str, list[FleetRow]] = {}
+        for r in rows:
+            sat_by_name.setdefault(r.name, []).append(r)
+
+        out: dict[str, Any] = {"create": [], "replace": [], "skip_identical": [],
+                               "refused": {}, "targets": {}, "new_shas": {}}
+        for n in universe:
+            group = by_name.get(n)
+            if not group:
+                continue  # already refused as not-local
+            lrow = sorted(group, key=lambda r: r.relpath)[0]
+            if n in twin_names:
+                out["refused"][n] = "twin (multiple local copies)"
+                refusals.append(f"{mname}: {n} twin on local side — refusing")
+                continue
+            if n in symlink_names:
+                out["refused"][n] = "symlinked skill dir"
+                refusals.append(f"{mname}: {n} symlinked skill dir — refusing")
+                continue
+            sat_rows = sat_by_name.get(n)
+            if not sat_rows:
+                if n in allow_missing:
+                    out["refused"][n] = "absent by policy (allow_missing)"
+                    refusals.append(f"{mname}: {n} absent by policy")
+                    continue
+                if _is_category_target(lrow.relpath, sat_paths):
+                    out["refused"][n] = f"target {lrow.relpath} is a satellite category"
+                    refusals.append(f"{mname}: {n} target {lrow.relpath} is a category — refusing")
+                    continue
+                out["create"].append(n)
+                out["targets"][n] = lrow.relpath
+                out["new_shas"][n] = lrow.sha
+                continue
+            sat = sorted(sat_rows, key=lambda r: r.relpath)[0]
+            if sat.sha == lrow.sha:
+                out["skip_identical"].append(n)
+                continue
+            if n in owned:
+                out["refused"][n] = "owned by machine"
+                refusals.append(f"{mname}: {n} owned by machine — refusing")
+                continue
+            if sat.sha == baseline.get(n):
+                out["replace"].append(n)  # provably behind a recorded Mac generation
+                out["targets"][n] = sat.relpath  # replace in place, wherever it lives
+                out["new_shas"][n] = lrow.sha
+            else:
+                out["refused"][n] = "diverged (matches no recorded Mac generation)"
+                refusals.append(f"{mname}: {n} diverged — refusing")
+        plan["machines"][mname] = out
+
+    plan["ok"] = not refusals and not errors_present
+    return plan
+
+
+_JUNK_FILENAMES = {".DS_Store"}
+
+
+def _is_junk_member(name: str) -> bool:
+    return name in _JUNK_FILENAMES or name.startswith("._")
+
+
+def build_bundle(skills: dict[str, str | os.PathLike]) -> bytes:
+    """One tgz for the whole push: top-level member ``<name>/`` per skill.
+    Symlinks anywhere in a skill dir are refused (hub policy — a link would
+    copy its target and leak it to the agent); AppleDouble and Finder litter
+    never ships."""
+    import io
+    import tarfile
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tf:
+        for name, path in skills.items():
+            path = os.fspath(path)
+            for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+                for d in dirnames:
+                    if os.path.islink(os.path.join(dirpath, d)):
+                        raise ValueError(f"{name}: contains symlink {d!r} — refusing to bundle")
+                for fn in filenames:
+                    if os.path.islink(os.path.join(dirpath, fn)):
+                        raise ValueError(f"{name}: contains symlink {fn!r} — refusing to bundle")
+                    if _is_junk_member(fn):
+                        continue
+                    full = os.path.join(dirpath, fn)
+                    rel = os.path.relpath(full, path).replace(os.sep, "/")
+                    tf.add(full, arcname=f"{name}/{rel}")
+    return buffer.getvalue()
+
+
+def render_bash_writer() -> str:
+    """POSIX write side. Args: <skills-root> <bundle.tgz> <entries-file>
+    <status-out>. Entries: ``name|relpath|newsha``. Per entry: extract once,
+    verify the STAGED SKILL.md hash before touching the target (a corrupt
+    transfer must never reach the library), refuse category buckets and
+    non-dirs, back the old copy up OUTSIDE the skills root, then swap.
+    Status lines ``OK|REFUSED|FAILED <name> [reason]`` + DONE."""
+    return f"""#!/bin/sh
+# usage: writer.sh <skills-root> <bundle.tgz> <entries> <status-out>
+ROOT="$1"; BUNDLE="$2"; ENTRIES="$3"; OUT="$4"
+: > "$OUT" || exit 9
+TS=$(date -u +%Y%m%d-%H%M%S)
+BK="$(dirname "$ROOT")/skills-fleet-backup-$TS"
+STAGE="$(dirname "$ROOT")/.fleet-stage-$$"
+cleanup() {{ rm -rf "$STAGE"; }}
+trap cleanup EXIT INT TERM
+mkdir -p "$STAGE" || {{ echo "FAILED setup stage-dir" >> "$OUT"; echo DONE >> "$OUT"; exit 0; }}
+tar -xzf "$BUNDLE" -C "$STAGE" 2>>"$OUT" || {{ echo "FAILED setup extract" >> "$OUT"; echo DONE >> "$OUT"; exit 0; }}
+printf '%s' "" > /dev/null
+while IFS='|' read -r nm rel newsha; do
+  [ -n "$nm" ] || continue
+  TARGET="$ROOT/$rel"
+  if [ -e "$TARGET" ] && [ ! -d "$TARGET" ]; then
+    echo "REFUSED $nm target-not-a-dir" >> "$OUT"; continue
+  fi
+  if [ -d "$TARGET" ] && [ ! -f "$TARGET/SKILL.md" ] && [ -n "$(ls -A "$TARGET" 2>/dev/null)" ]; then
+    echo "REFUSED $nm category-target" >> "$OUT"; continue
+  fi
+  if [ ! -f "$STAGE/$nm/SKILL.md" ]; then
+    echo "FAILED $nm missing-in-bundle" >> "$OUT"; continue
+  fi
+  got=$(sha256sum "$STAGE/$nm/SKILL.md" | head -c64)
+  if [ "$got" != "$newsha" ]; then
+    echo "FAILED $nm stage-hash-mismatch" >> "$OUT"; continue
+  fi
+  if [ -d "$TARGET" ]; then
+    mkdir -p "$BK" && mv "$TARGET" "$BK/$nm" || {{ echo "FAILED $nm backup" >> "$OUT"; continue; }}
+  fi
+  mkdir -p "$(dirname "$TARGET")" && mv "$STAGE/$nm" "$TARGET" \\
+    && echo "OK $nm" >> "$OUT" || echo "FAILED $nm swap" >> "$OUT"
+done < "$ENTRIES"
+echo "{_DONE}" >> "$OUT"
+"""
+
+
+def render_ps_writer() -> str:
+    """Windows write side, PS 5.1 + tar.exe (bsdtar on Win10+). Same protocol
+    and guards as the bash writer."""
+    return f"""param([string]$Root, [string]$Bundle, [string]$Entries, [string]$Out)
+Set-Content -Path $Out -Value ""
+$Root = (Get-Item -LiteralPath $Root).FullName.TrimEnd('\\')
+$Ts = Get-Date -AsUTC -Format "yyyyMMdd-HHmmss"
+$Bk = Join-Path (Split-Path -Parent $Root) "skills-fleet-backup-$Ts"
+$Stage = Join-Path (Split-Path -Parent $Root) ".fleet-stage-$PID"
+New-Item -ItemType Directory -Force -Path $Stage | Out-Null
+try {{
+  tar -xzf $Bundle -C $Stage 2>&1 | Out-Null
+  if ($LASTEXITCODE -ne 0) {{ Add-Content $Out "FAILED setup extract"; Add-Content $Out "{_DONE}"; return }}
+  foreach ($line in Get-Content -LiteralPath $Entries) {{
+    if (-not $line.Trim()) {{ continue }}
+    $parts = $line.Split('|')
+    if ($parts.Count -lt 3) {{ continue }}
+    $nm = $parts[0]; $rel = $parts[1]; $newsha = $parts[2]
+    $target = Join-Path $Root ($rel -replace '/', '\\')
+    if ((Test-Path -LiteralPath $target) -and -not (Test-Path -LiteralPath $target -PathType Container)) {{
+      Add-Content $Out "REFUSED $nm target-not-a-dir"; continue }}
+    if ((Test-Path -LiteralPath $target -PathType Container) -and -not (Test-Path -LiteralPath (Join-Path $target 'SKILL.md'))) {{
+      $kids = @(Get-ChildItem -LiteralPath $target -Force -ErrorAction SilentlyContinue)
+      if ($kids.Count -gt 0) {{ Add-Content $Out "REFUSED $nm category-target"; continue }}
+    }}
+    $staged = Join-Path $Stage ($nm + '\\SKILL.md')
+    if (-not (Test-Path -LiteralPath $staged -PathType Leaf)) {{
+      Add-Content $Out "FAILED $nm missing-in-bundle"; continue }}
+    $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $staged).Hash.ToLower()
+    if ($got -ne $newsha) {{ Add-Content $Out "FAILED $nm stage-hash-mismatch"; continue }}
+    if (Test-Path -LiteralPath $target) {{
+      New-Item -ItemType Directory -Force -Path $Bk | Out-Null
+      Move-Item -LiteralPath $target (Join-Path $Bk $nm) -Force
+    }}
+    $parent = Split-Path -Parent $target
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    try {{
+      Move-Item -LiteralPath (Join-Path $Stage $nm) $target -Force
+      Add-Content $Out "OK $nm"
+    }} catch {{ Add-Content $Out "FAILED $nm swap" }}
+  }}
+}} finally {{
+  Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
+}}
+Add-Content -Path $Out -Value "{_DONE}"
+"""
+
+
+def parse_write_output(raw: bytes, expected: Optional[set] = None) -> dict[str, tuple[str, str]]:
+    """``OK|REFUSED|FAILED <name> [reason…]`` lines → ``{name: (status, reason)}``.
+    With ``expected`` (the planned skill names), a status line whose second
+    token is NOT a planned name is keyed under ``""`` — a GLOBAL setup failure
+    the caller must fail on. Missing DONE sentinel = writer died → ValueError
+    (never a silent no-op)."""
+    text = raw.decode("utf-8", errors="replace")
+    out: dict[str, tuple[str, str]] = {}
+    saw_sentinel = False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line == _DONE:
+            saw_sentinel = True
+            break
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0] in ("OK", "REFUSED", "FAILED"):
+            if expected is not None and parts[1] not in expected:
+                reason = " ".join(parts[1:])
+                out[""] = (parts[0], reason)
+                continue
+            out.setdefault(parts[1], (parts[0], parts[2] if len(parts) > 2 else ""))
+    if not saw_sentinel:
+        raise ValueError("writer output missing DONE sentinel (writer died before finishing)")
+    return out
+
+
+def run_push(machines: list[dict], local_root=None, transport=None,
+             baseline: Optional[dict[str, str]] = None,
+             selector: tuple[str, list[str]] = ("stale", []),
+             apply: bool = False) -> dict[str, Any]:
+    """Scan → plan → (apply: bundle + write + post-verify). Without ``apply``
+    the transport only ever sees read-only probe traffic."""
+    if local_root is None:
+        from tools import skills_tool as st
+        local_root = st.SKILLS_DIR
+    transport = transport or _ssh_transport
+    local = local_rows(local_root)
+    local_paths: dict[str, str] = {}
+    for r in local:
+        local_paths.setdefault(r.name, os.path.join(os.fspath(local_root), r.relpath))
+
+    rows_by_machine, errors = _probe_machines(machines, transport)
+    rows_in: dict[str, Optional[list[FleetRow]]] = dict(rows_by_machine)
     for name, err in errors.items():
-        report["machines"][name] = {"error": err}
-    report["ok"] = bool(report["ok"]) and not errors
-    report["local_counts"] = {"rows": len(local), "names": len({r.name for r in local})}
+        rows_in[name] = None
+    plan = plan_push(local_root, rows_in, machines, baseline or {}, selector)
+    report: dict[str, Any] = {**plan, "applied": False}
+
+    if not apply:
+        report["ok"] = bool(plan["ok"])
+        return report
+    report["applied"] = True
+
+    for machine in machines:
+        mname, kind = machine.get("name", "?"), machine.get("kind", "")
+        m = report["machines"].get(mname, {})
+        todo = list(m.get("create", [])) + list(m.get("replace", []))
+        if not todo or "error" in m:
+            m.setdefault("applied", [])
+            m.setdefault("verified", [])
+            m.setdefault("remote_refused", [])
+            m.setdefault("remote_failed", [])
+            continue
+        try:
+            bundle = build_bundle({n: local_paths[n] for n in todo})
+        except ValueError as exc:
+            report["refusals"].append(f"{mname}: {exc}")
+            m["applied"], m["verified"] = [], []
+            m["remote_refused"], m["remote_failed"] = [], []
+            report["ok"] = False
+            continue
+        entries = "".join(f"{n}|{m['targets'][n]}|{m['new_shas'][n]}\n" for n in todo)
+        writer = render_bash_writer() if kind == "bash" else render_ps_writer()
+        try:
+            raw = transport(machine, writer, payload=bundle, phase="write",
+                            entries=entries.encode())
+            statuses = parse_write_output(raw, expected=set(todo))
+        except Exception as exc:
+            report["refusals"].append(f"{mname}: write transport failed: {exc}")
+            m["applied"], m["verified"] = [], []
+            m["remote_refused"], m["remote_failed"] = [], []
+            report["ok"] = False
+            continue
+        m["applied"] = [n for n in todo if statuses.get(n, ("", ""))[0] == "OK"]
+        m["remote_refused"] = [n for n in todo if statuses.get(n, ("", ""))[0] == "REFUSED"]
+        m["remote_failed"] = [n for n in todo if statuses.get(n, ("", ""))[0] == "FAILED"]
+        if "" in statuses:  # global setup failure: nothing ran, the whole write died
+            m["remote_failed"] = list(todo)
+            m["applied"] = []
+            m["verified"] = []
+            report["refusals"].append(
+                f"{mname}: writer failed globally ({statuses[''][1] or 'setup'}) — no skill written")
+            report["ok"] = False
+            continue
+
+        # post-verify: re-probe and require every applied name to now match Mac
+        probe = render_bash_probe() if kind == "bash" else render_ps_probe()
+        try:
+            vrows = parse_probe_output(transport(machine, probe, phase="verify"))
+        except Exception as exc:
+            report["refusals"].append(f"{mname}: verify probe failed: {exc}")
+            m["verified"] = []
+            report["ok"] = False
+            continue
+        vsha = {r.name: r.sha for r in vrows}
+        m["verified"] = [n for n in m["applied"] if vsha.get(n) == m["new_shas"][n]]
+        for n in m["applied"]:
+            if n not in m["verified"]:
+                report["refusals"].append(f"{mname}: {n} post-verify mismatch")
+        if m["remote_refused"] or m["remote_failed"] or len(m["verified"]) != len(m["applied"]):
+            report["ok"] = False
     return report
+
+
+def _load_baseline(path=None) -> dict[str, str]:
+    """name → recorded SKILL.md sha from the fleet manifest (the ``--stale``
+    behind-test's evidence store). Missing/unreadable → empty (stale degrades
+    to creates-only)."""
+    import json
+    if path is None:
+        from hermes_cli.config import cfg_get, load_config
+        path = cfg_get(load_config(), "skills", "fleet", "baseline_manifest") \
+            or os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+                            "skills.fleet-manifest.json")
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, str] = {}
+    skills = data.get("skills") or {}
+    items = skills.items() if isinstance(skills, dict) else \
+        [(e.get("name"), e) for e in skills if isinstance(e, dict)]
+    for name, entry in items:
+        if isinstance(entry, dict):
+            sha = (entry.get("files") or {}).get("SKILL.md")
+            if name and sha:
+                out[name] = sha
+    return out
+
+
+def do_fleet_push(as_json: bool = False, stale: bool = False,
+                  names: Optional[list[str]] = None, machines_filter: Optional[list[str]] = None,
+                  apply: bool = False, console: Optional[Any] = None) -> Optional[bool]:
+    """CLI entry: ``hermes skills fleet push``. Dry-run by default; writes
+    only with ``--yes``. Returns False on any refusal or failed entry."""
+    if not stale and not names:
+        (console or _console()).print("Specify a selector: --stale or --names N [N…]")
+        return None
+    machines = _fleet_machines(machines_filter)
+    if not machines:
+        (console or _console()).print("No fleet machines configured (skills.fleet.machines).")
+        return None
+    baseline = _load_baseline()
+    report = run_push(machines, baseline=baseline,
+                      selector=("stale", []) if stale else ("names", list(names or [])),
+                      apply=apply)
+    if as_json:
+        import json
+        print(json.dumps(report, indent=1))
+    else:
+        _render_push(report, console or _console(), apply)
+    return None if report.get("ok") else False
+
+
+def _render_push(report: dict, c, apply: bool) -> None:
+    head = "Skills fleet push — APPLYING" if apply else "Skills fleet push — DRY RUN (add --yes to apply)"
+    c.print(f"[bold]{head}[/]\n")
+    for r in report.get("refusals", [])[:25]:
+        c.print(f"  [yellow]refused[/] {r}")
+    if len(report.get("refusals", [])) > 25:
+        c.print(f"  [dim]… {len(report['refusals']) - 25} more refusals[/]")
+    for name, m in report.get("machines", {}).items():
+        if "error" in m:
+            c.print(f"[bold red]{name}: {m['error']}[/]")
+            continue
+        c.print(f"[bold]{name}[/]: create {len(m.get('create', []))}, "
+                f"replace {len(m.get('replace', []))}, "
+                f"identical {len(m.get('skip_identical', []))}, "
+                f"refused {len(m.get('refused', {}))}")
+        if apply:
+            c.print(f"  applied {len(m.get('applied', []))}, verified {len(m.get('verified', []))}, "
+                    f"remote-refused {len(m.get('remote_refused', []))}, "
+                    f"remote-failed {len(m.get('remote_failed', []))}")
+    c.print("[green]plan clean[/]" if report.get("ok") else "[bold red]refusals/failures present — nothing unsafe was written[/]")
 
 
 def _fleet_machines(only: Optional[list[str]] = None) -> list[dict]:

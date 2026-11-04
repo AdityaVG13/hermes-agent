@@ -97,6 +97,23 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     add_json_flag(fleet_scan, "Output JSON instead of text (scripting-friendly)")
     fleet_scan.add_argument("--only", nargs="+", metavar="NAME",
         help="Restrict the scan to these machine names from the config block")
+    fleet_push = fleet_sub.add_parser(
+        "push", help="Plan (and with --yes, apply) pushing skills to fleet machines",
+        description="Dry-run by default. --stale pushes only provably-safe updates: "
+            "skills missing on a machine, and copies whose SKILL.md hash matches a "
+            "RECORDED prior Mac generation (the fleet manifest baseline) — i.e. the "
+            "satellite is behind. Diverged-unknown, machine-owned, twin, symlinked, "
+            "and policy-absent skills are refused. Writes stage-verify before swap, "
+            "back the old copy up outside the skills root, and re-probe afterwards.")
+    fleet_push.add_argument("--stale", action="store_true",
+        help="Select missing + provably-behind skills on every machine")
+    fleet_push.add_argument("--names", nargs="+", metavar="SKILL",
+        help="Push these local skills (still refuses diverged/owned)")
+    fleet_push.add_argument("--machines", nargs="+", metavar="NAME",
+        help="Restrict the push to these machine names")
+    fleet_push.add_argument("--yes", action="store_true",
+        help="Apply the plan (default: dry-run)")
+    add_json_flag(fleet_push, "Output JSON instead of text (scripting-friendly)")
 
     skills_update = skills_subparsers.add_parser("update", help="Update installed hub skills")
     skills_update.add_argument(

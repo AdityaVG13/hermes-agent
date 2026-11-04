@@ -17,7 +17,7 @@ from rich.table import Table
 # tools.skills_hub / tools.skills_guard are imported inside functions (cycles + startup cost).
 from hermes_constants import display_hermes_home
 from hermes_cli.skills_health import do_health
-from hermes_cli.skills_fleet import do_fleet_scan
+from hermes_cli.skills_fleet import do_fleet_push, do_fleet_scan
 
 _console = Console()
 
@@ -1553,8 +1553,12 @@ _CLI_ACTIONS = {
                               enabled_only=getattr(a, "enabled_only", False)),
     "check": lambda a: do_check(name=getattr(a, "name", None)),
     "health": lambda a: do_health(as_json=getattr(a, "json", False)),
-    "fleet": lambda a: do_fleet_scan(as_json=getattr(a, "json", False),
-                                     only=getattr(a, "only", None)),
+    "fleet": lambda a: (
+        do_fleet_push(as_json=getattr(a, "json", False), stale=getattr(a, "stale", False),
+                      names=getattr(a, "names", None), machines_filter=getattr(a, "machines", None),
+                      apply=getattr(a, "yes", False))
+        if getattr(a, "fleet_action", None) == "push" else
+        do_fleet_scan(as_json=getattr(a, "json", False), only=getattr(a, "only", None))),
     "update": lambda a: do_update(name=getattr(a, "name", None), force=getattr(a, "force", False)),
     "audit": lambda a: do_audit(name=getattr(a, "name", None), deep=getattr(a, "deep", False)),
     "uninstall": lambda a: do_uninstall(a.name, skip_confirm=getattr(a, "yes", False)),
@@ -1656,8 +1660,15 @@ _SLASH_ACTIONS = {
         enabled_only="--enabled-only" in args or "--enabled" in args, console=c),
     "check": lambda args, c: do_check(name=args[0] if args else None, console=c),
     "health": lambda args, c: do_health(as_json="--json" in args, console=c),
-    "fleet": lambda args, c: do_fleet_scan(as_json="--json" in args, console=c,
-        only=args[args.index("--only") + 1:] if "--only" in args else None),
+    "fleet": lambda args, c: (
+        do_fleet_push(as_json="--json" in args, console=c,
+                      stale="--stale" in args,
+                      names=args[args.index("--names") + 1:] if "--names" in args else None,
+                      machines_filter=args[args.index("--machines") + 1:] if "--machines" in args else None,
+                      apply="--yes" in args)
+        if "push" in args else
+        do_fleet_scan(as_json="--json" in args, console=c,
+            only=args[args.index("--only") + 1:] if "--only" in args else None)),
     "update": lambda args, c: do_update(
         name=next((a for a in args if not a.startswith("--")), None), console=c,
         force="--force" in args),
