@@ -84,6 +84,20 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
             "library. Exits non-zero when findings exist.")
     add_json_flag(skills_health, "Output JSON instead of text (scripting-friendly)")
 
+    skills_fleet = skills_subparsers.add_parser(
+        "fleet", help="Compare this machine's skills library against fleet machines",
+        description="Cross-machine drift scan. Machines come from the "
+            "skills.fleet.machines config block (name/host/root/kind); probes are "
+            "loader-faithful (unlimited depth, frontmatter-name keyed, symlink-aware) "
+            "and read-only. Exits non-zero when drift, diverged twins, or unreachable "
+            "machines exist.")
+    fleet_sub = skills_fleet.add_subparsers(dest="fleet_action")
+    fleet_scan = fleet_sub.add_parser(
+        "scan", help="Probe every machine and classify drift vs this machine")
+    add_json_flag(fleet_scan, "Output JSON instead of text (scripting-friendly)")
+    fleet_scan.add_argument("--only", nargs="+", metavar="NAME",
+        help="Restrict the scan to these machine names from the config block")
+
     skills_update = skills_subparsers.add_parser("update", help="Update installed hub skills")
     skills_update.add_argument(
         "name", nargs="?", help="Specific skill to update (default: all outdated skills)")
