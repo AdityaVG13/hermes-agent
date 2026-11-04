@@ -17,7 +17,7 @@ from rich.table import Table
 # tools.skills_hub / tools.skills_guard are imported inside functions (cycles + startup cost).
 from hermes_constants import display_hermes_home
 from hermes_cli.skills_health import do_health
-from hermes_cli.skills_fleet import do_fleet_push, do_fleet_scan
+from hermes_cli.skills_fleet import do_fleet_manifest, do_fleet_push, do_fleet_scan
 
 _console = Console()
 
@@ -1554,6 +1554,8 @@ _CLI_ACTIONS = {
     "check": lambda a: do_check(name=getattr(a, "name", None)),
     "health": lambda a: do_health(as_json=getattr(a, "json", False)),
     "fleet": lambda a: (
+        do_fleet_manifest(path=getattr(a, "path", None), as_json=getattr(a, "json", False))
+        if getattr(a, "fleet_action", None) == "manifest" else
         do_fleet_push(as_json=getattr(a, "json", False), stale=getattr(a, "stale", False),
                       names=getattr(a, "names", None), machines_filter=getattr(a, "machines", None),
                       apply=getattr(a, "yes", False))
@@ -1661,6 +1663,9 @@ _SLASH_ACTIONS = {
     "check": lambda args, c: do_check(name=args[0] if args else None, console=c),
     "health": lambda args, c: do_health(as_json="--json" in args, console=c),
     "fleet": lambda args, c: (
+        do_fleet_manifest(path=_opt_value(args, "--path", ""),
+                          as_json="--json" in args, console=c)
+        if "manifest" in args else
         do_fleet_push(as_json="--json" in args, console=c,
                       stale="--stale" in args,
                       names=args[args.index("--names") + 1:] if "--names" in args else None,

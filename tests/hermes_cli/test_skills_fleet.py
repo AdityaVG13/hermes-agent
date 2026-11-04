@@ -518,3 +518,52 @@ def test_parse_write_output_global_lines_key_empty():
     # without an expected set, behavior is unchanged (name = second token)
     st2 = sf.parse_write_output(b"FAILED setup extract\nDONE\n")
     assert st2["setup"][0] == "FAILED"
+
+
+# ── manifest: the baseline evidence store ────────────────────────────────────
+
+def test_manifest_snapshot_hashes_all_files_excluding_junk(local_root):
+    make_skill(local_root, "rich")
+    (local_root / "rich" / "references").mkdir()
+    (local_root / "rich" / "references" / "api.md").write_text("api")
+    (local_root / "rich" / "._leak").write_bytes(b"\x00junk")
+    (local_root / "rich" / ".DS_Store").write_bytes(b"finder")
+    make_skill(local_root, "mlops/models/deep", name="deep-one")
+
+    man = sf.build_manifest(local_root)
+    skills = dict(man["skills"])
+    assert set(skills) == {"rich", "deep-one"}
+    rich = skills["rich"]
+    assert rich["relpath"] == "rich" and rich["symlink"] is False
+    assert rich["files"]["SKILL.md"] == sha_of(local_root / "rich" / "SKILL.md")
+    assert rich["files"]["references/api.md"] == sha_of(local_root / "rich" / "references" / "api.md")
+    assert not any("._" in f or ".DS_Store" in f for f in rich["files"])
+    assert skills["deep-one"]["relpath"] == "mlops/models/deep"
+    assert man["generated_at"] and man["generator"].startswith("hermes skills fleet")
+
+
+def test_manifest_baseline_compat(local_root):
+    make_skill(local_root, "plain")
+    man = sf.build_manifest(local_root)
+    p = local_root.parent / "manifest.json"
+    sf.write_manifest(p, man)
+    base = sf._load_baseline(p)
+    assert base == {"plain": sha_of(local_root / "plain" / "SKILL.md")}
+
+
+def test_manifest_write_atomic_and_keeps_prev(local_root):
+    make_skill(local_root, "first")
+    p = local_root.parent / "manifest.json"
+    sf.write_manifest(p, sf.build_manifest(local_root))
+    first = p.read_text()
+    make_skill(local_root, "second")
+    sf.write_manifest(p, sf.build_manifest(local_root))
+    second = p.read_text()
+    assert "second" in second and "second" not in first
+    assert (p.parent / (p.name + ".prev")).read_text() == first  # prior generation kept
+
+
+def test_manifest_refuses_empty_or_missing_root(tmp_path):
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="refusing"):
+        sf.build_manifest(tmp_path / "nonexistent")

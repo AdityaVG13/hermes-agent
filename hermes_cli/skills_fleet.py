@@ -80,13 +80,12 @@ def _sha256(path: str | os.PathLike) -> str:
     return h.hexdigest()
 
 
-def local_rows(root) -> list[FleetRow]:
-    """Loader-faithful rows for a local skills root: same walk semantics as the
-    catalog scanner (unlimited depth, followlinks, prune list, SKILL.md dirs
-    are leaves). Broken symlink dirs yield no row and no crash."""
+def _iter_skill_dirs(root):
+    """Yield (dirpath, rel, islink) for every loader-visible skill dir. This is
+    THE walk: local_rows (scan/push) and build_manifest (baseline) share it so
+    the evidence store can never disagree with what the tools compare."""
     root = os.fspath(root)
     prunes = set(PROBE_RULES["prunes"])
-    rows: list[FleetRow] = []
     for dirpath, dirnames, filenames in os.walk(root, followlinks=PROBE_RULES["follow_symlinks"]):
         dirnames[:] = [d for d in dirnames if d not in prunes]
         if "SKILL.md" not in filenames:
@@ -94,8 +93,16 @@ def local_rows(root) -> list[FleetRow]:
         skill_md = os.path.join(dirpath, "SKILL.md")
         name, _declared = _frontmatter_name(skill_md)
         rel = os.path.relpath(dirpath, root).replace(os.sep, "/")
-        rows.append(FleetRow(name, _sha256(skill_md), rel, os.path.islink(dirpath)))
+        yield dirpath, name, rel, os.path.islink(dirpath)
         dirnames[:] = []  # a dir holding SKILL.md is a leaf
+
+
+def local_rows(root) -> list[FleetRow]:
+    """Loader-faithful rows for a local skills root: same walk semantics as the
+    catalog scanner (unlimited depth, followlinks, prune list, SKILL.md dirs
+    are leaves). Broken symlink dirs yield no row and no crash."""
+    rows = [FleetRow(name, _sha256(os.path.join(d, "SKILL.md")), rel, islink)
+            for d, name, rel, islink in _iter_skill_dirs(root)]
     rows.sort(key=lambda r: r.name)
     return rows
 
@@ -810,24 +817,127 @@ def _load_baseline(path=None) -> dict[str, str]:
     to creates-only)."""
     import json
     if path is None:
-        from hermes_cli.config import cfg_get, load_config
-        path = cfg_get(load_config(), "skills", "fleet", "baseline_manifest") \
-            or os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
-                            "skills.fleet-manifest.json")
+        path = _baseline_path()
     try:
         data = json.loads(open(path, encoding="utf-8").read())
     except (OSError, ValueError):
         return {}
     out: dict[str, str] = {}
     skills = data.get("skills") or {}
-    items = skills.items() if isinstance(skills, dict) else \
-        [(e.get("name"), e) for e in skills if isinstance(e, dict)]
+    if isinstance(skills, dict):
+        items = list(skills.items())
+    else:
+        items = []
+        for e in skills:  # tolerate both [{name:…}, …] and [[name, {…}], …]
+            if isinstance(e, dict):
+                items.append((e.get("name"), e))
+            elif isinstance(e, (list, tuple)) and len(e) == 2 and isinstance(e[1], dict):
+                items.append((e[0], e[1]))
     for name, entry in items:
         if isinstance(entry, dict):
             sha = (entry.get("files") or {}).get("SKILL.md")
             if name and sha:
                 out[name] = sha
     return out
+
+
+def _baseline_path() -> str:
+    from hermes_cli.config import cfg_get, load_config
+    return cfg_get(load_config(), "skills", "fleet", "baseline_manifest") \
+        or os.path.join(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
+                        "skills.fleet-manifest.json")
+
+
+def build_manifest(local_root) -> dict[str, Any]:
+    """Snapshot THIS machine's skills as the recorded generation: per-skill
+    per-file sha256s, loader-faithful (same walk as scan/push). This file is
+    the evidence store `push --stale` testifies against — a satellite hash
+    matching a recorded generation is provably behind, anything else is
+    diverged-unknown and refused. An empty/missing root REFUSES rather than
+    write a baseline that would brand every satellite copy diverged."""
+    import datetime
+    utc = datetime.UTC
+    skills: list[list[Any]] = []
+    for dirpath, name, rel, islink in _iter_skill_dirs(local_root):
+        files: dict[str, str] = {}
+        for fdir, _dirs, fns in os.walk(dirpath, followlinks=False):
+            for fn in fns:
+                if _is_junk_member(fn):
+                    continue
+                full = os.path.join(fdir, fn)
+                frel = os.path.relpath(full, dirpath).replace(os.sep, "/")
+                try:
+                    files[frel] = _sha256(full)
+                except OSError:
+                    continue
+        files = dict(sorted(files.items()))
+        skills.append([name, {"relpath": rel, "symlink": islink, "files": files}])
+    if not skills:
+        raise ValueError(f"refusing to snapshot: no loader-visible skills under {local_root}")
+    skills.sort(key=lambda pair: pair[0])
+    return {
+        "generator": "hermes skills fleet manifest",
+        "generated_at": datetime.datetime.now(utc).isoformat(timespec="seconds"),
+        "root": os.fspath(local_root),
+        "skills": skills,
+    }
+
+
+def write_manifest(path, manifest: dict[str, Any]) -> None:
+    """Atomic (tmp + rename) with the prior generation kept at ``<path>.prev``
+    — the baseline is the only evidence of 'behind', so its history is never
+    silently discarded."""
+    import json
+    import tempfile
+    path = os.fspath(path)
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    if os.path.exists(path):
+        prev = path + ".prev"
+        try:
+            os.replace(path, prev)
+        except OSError:
+            pass
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)) or ".",
+                               prefix=".manifest-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=1, sort_keys=False)
+            fh.write("\n")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def refresh_baseline(local_root=None, path=None) -> int:
+    """Regenerate the baseline from current disk; returns the skill count."""
+    if local_root is None:
+        from tools import skills_tool as st
+        local_root = st.SKILLS_DIR
+    manifest = build_manifest(local_root)
+    write_manifest(path or _baseline_path(), manifest)
+    return len(manifest["skills"])
+
+
+def do_fleet_manifest(path: Optional[str] = None, as_json: bool = False,
+                      console: Optional[Any] = None) -> Optional[bool]:
+    """CLI entry: ``hermes skills fleet manifest`` — record this machine's
+    current generation as the push baseline."""
+    from tools import skills_tool as st
+    target = path or _baseline_path()
+    manifest = build_manifest(st.SKILLS_DIR)
+    write_manifest(target, manifest)
+    n = len(manifest["skills"])
+    files = sum(len((e or {}).get("files", {})) for _name, e in manifest["skills"])
+    if as_json:
+        import json
+        print(json.dumps({"path": target, "skills": n, "files": files,
+                          "generated_at": manifest["generated_at"]}, indent=1))
+    else:
+        (console or _console()).print(
+            f"Baseline refreshed: [bold]{n}[/] skills, {files} files hashed → {target}\n"
+            f"(prior generation kept at {target}.prev)")
+    return True
 
 
 def do_fleet_push(as_json: bool = False, stale: bool = False,
@@ -846,6 +956,16 @@ def do_fleet_push(as_json: bool = False, stale: bool = False,
     report = run_push(machines, baseline=baseline,
                       selector=("stale", []) if stale else ("names", list(names or [])),
                       apply=apply)
+    if apply and report.get("applied") and any(
+            m.get("verified") for m in report["machines"].values()
+            if isinstance(m, dict)):
+        # Record the just-pushed generation as the new baseline, so future Mac
+        # edits make satellite copies provably-behind instead of unknown.
+        try:
+            n = refresh_baseline()
+            report["baseline_refreshed"] = n
+        except ValueError as exc:
+            report["refusals"].append(f"baseline refresh refused: {exc}")
     if as_json:
         import json
         print(json.dumps(report, indent=1))

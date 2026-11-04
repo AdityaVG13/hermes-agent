@@ -114,6 +114,17 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     fleet_push.add_argument("--yes", action="store_true",
         help="Apply the plan (default: dry-run)")
     add_json_flag(fleet_push, "Output JSON instead of text (scripting-friendly)")
+    fleet_manifest = fleet_sub.add_parser(
+        "manifest", help="Re-snapshot this machine's skills as the push baseline",
+        description="Records per-skill per-file hashes into the fleet manifest "
+            "(skills.fleet.baseline_manifest, default ~/.hermes/skills.fleet-manifest.json). "
+            "This is the evidence store behind 'push --stale': a satellite copy "
+            "matching a recorded generation is provably behind. Atomic write; "
+            "prior generation kept at <path>.prev. `push --yes` refreshes it "
+            "automatically after verified writes.")
+    fleet_manifest.add_argument("--path", metavar="FILE",
+        help="Manifest path (default: skills.fleet.baseline_manifest or ~/.hermes/skills.fleet-manifest.json)")
+    add_json_flag(fleet_manifest, "Output JSON instead of text (scripting-friendly)")
 
     skills_update = skills_subparsers.add_parser("update", help="Update installed hub skills")
     skills_update.add_argument(
