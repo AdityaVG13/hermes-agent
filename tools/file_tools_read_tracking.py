@@ -55,7 +55,7 @@ def _task_data(task_id: str) -> dict:
     task_data = _read_tracker.setdefault(task_id, {
         "last_key": None, "consecutive": 0, "read_history": set()})
     for key in ("dedup", "dedup_hits", "read_timestamps", "read_coverage", "full_write_baselines",
-                "blind_patches"):
+                "blind_patches", "region_hashes"):
         task_data.setdefault(key, {})
     task_data.setdefault("dedup_generation_reads", set())
     return task_data
@@ -89,6 +89,7 @@ def _cap_read_tracker_data(task_data: dict) -> None:
         ("read_history", _READ_HISTORY_CAP),
         ("dedup", _DEDUP_CAP),
         ("dedup_hits", _DEDUP_CAP),
+        ("region_hashes", _DEDUP_CAP),
         ("dedup_generation_reads", _DEDUP_CAP),
         ("read_timestamps", _READ_TIMESTAMPS_CAP),
         ("read_coverage", _READ_TIMESTAMPS_CAP),

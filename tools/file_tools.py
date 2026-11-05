@@ -8,6 +8,7 @@ staleness state).
 
 import base64
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -504,6 +505,7 @@ def _dedup_stub_or_block(task_data: dict, dedup_key: tuple, path: str) -> str:
     with _read_tracker_lock:
         hits = task_data["dedup_hits"].get(dedup_key, 0) + 1
         task_data["dedup_hits"][dedup_key] = hits
+        stored_hash = task_data.get("region_hashes", {}).get(dedup_key)
         _cap_read_tracker_data(task_data)
 
     if hits >= 2:
@@ -528,6 +530,7 @@ def _dedup_stub_or_block(task_data: dict, dedup_key: tuple, path: str) -> str:
         "path": path,
         "dedup": True,
         "content_returned": False,
+        **({"content_hash": stored_hash} if stored_hash else {}),
     }, ensure_ascii=False)
 
 
@@ -602,7 +605,8 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
     return count
 
 
-def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, task_id: str = "default") -> str:
+def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, task_id: str = "default",
+                   if_hash: str = "") -> str:
     """Read a file with pagination and line numbers.
 
     Guard order: NT/device-namespace prefix (raw string, no resolution) →
@@ -727,6 +731,31 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
                 "to keep context usage efficient."))
 
         total_lines = result_dict.get("total_lines")
+        # Hash handshake (prompt-cache lever 4): stamp the FINAL rendered bytes
+        # (post budget/redaction — exactly what the model holds) and honor an
+        # ``if_hash`` claim from the model. A match means the model already has
+        # these bytes in context: return a stub instead of re-sending them.
+        # Placed BEFORE _record_successful_read so a stubbed read never blesses
+        # a write baseline or bumps the consecutive-read loop counters — the
+        # model explicitly asked for "tell me if unchanged", not for content.
+        content_hash = ""
+        if result.content:
+            content_hash = hashlib.sha256(result.content.encode("utf-8")).hexdigest()[:16]
+            result_dict["content_hash"] = content_hash
+            with _read_tracker_lock:
+                task_data.setdefault("region_hashes", {})[dedup_key] = content_hash
+            wanted_hash = (if_hash or "").strip().lower()
+            if wanted_hash and wanted_hash == content_hash:
+                return json.dumps({
+                    "status": "unchanged",
+                    "message": (
+                        "This region is byte-identical to the content_hash you "
+                        "supplied: your in-context copy is current. No content re-sent."),
+                    "path": path,
+                    "if_hash": wanted_hash,
+                    "content_hash": content_hash,
+                    "content_returned": False,
+                }, ensure_ascii=False)
         if result_dict.get("truncated_by") == "bytes":
             end_line = int(result_dict.get("next_offset", offset)) - 1
         else:
@@ -1159,13 +1188,14 @@ READ_FILE_SCHEMA = {
     # route we trust (_read_file_schema_overrides). Scanned-page coverage
     # teaching lives in the response-time NEEDS-OCR warning
     # (read_extract.py); the schema doesn't pre-teach it.
-    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are truncated on a line boundary and return a next_offset; continue with offset to read the rest. Documents auto-extract to readable text: .ipynb, Office (.docx/.xlsx/.pptx and legacy .doc/.ppt/.xls), PDF (text layer), OpenDocument, RTF, EPUB, SQLite (.db/.sqlite: schema, row counts, first rows). Cannot read images/binary — use vision_analyze for images.",
+    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are truncated on a line boundary and return a next_offset; continue with offset to read the rest. Every result carries content_hash (sha256 of the returned bytes); pass it back as if_hash on a later read of the same region to receive {\"status\":\"unchanged\"} instead of identical content when nothing changed. Documents auto-extract to readable text: .ipynb, Office (.docx/.xlsx/.pptx and legacy .doc/.ppt/.xls), PDF (text layer), OpenDocument, RTF, EPUB, SQLite (.db/.sqlite: schema, row counts, first rows). Cannot read images/binary — use vision_analyze for images.",
     "parameters": {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path)"},
             "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)", "default": 1, "minimum": 1},
-            "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 2000, max: 2000). Reads are additionally capped at a ~100K-character budget with a next_offset continuation.", "default": DEFAULT_READ_LIMIT, "maximum": 2000}
+            "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 2000, max: 2000). Reads are additionally capped at a ~100K-character budget with a next_offset continuation.", "default": DEFAULT_READ_LIMIT, "maximum": 2000},
+            "if_hash": {"type": "string", "description": "A content_hash from an earlier read of this same region. When the current bytes still match it, you get {\"status\":\"unchanged\"} with no content re-sent; when they differ, full content returns.", "default": ""}
         },
         "required": ["path"]
     }
