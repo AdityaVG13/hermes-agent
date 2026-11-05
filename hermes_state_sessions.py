@@ -874,6 +874,26 @@ class SessionSessionsMixin:
         )
         return dict(row) if row else None
 
+    def get_route_cache_stats(self, window_days: int = 14) -> list[dict[str, Any]]:
+        """Per-(model, provider, base_url) prompt-cache aggregates over the trailing
+        window, for the cache-route guard: calls, cache-read, cache-write, uncached
+        input. Blank and ``unknown`` models/providers are out — the guard speaks to
+        main-loop routing decisions, not approval/title aux lanes."""
+        self.flush_for_read()
+        rows = self._read_all(
+            """SELECT model, billing_provider, billing_base_url,
+                      SUM(api_call_count) AS calls,
+                      SUM(cache_read_tokens) AS cache_read,
+                      SUM(cache_write_tokens) AS cache_write,
+                      SUM(input_tokens) AS input_tokens
+                 FROM session_model_usage
+                WHERE last_seen > ? AND model <> '' AND model <> 'unknown'
+                  AND billing_provider <> ''
+                GROUP BY model, billing_provider, billing_base_url""",
+            (time.time() - window_days * 86400.0,),
+        )
+        return [dict(r) for r in rows]
+
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Exact id, else the single unambiguous prefix match, else None."""
         exact = self.get_session(session_id_or_prefix)

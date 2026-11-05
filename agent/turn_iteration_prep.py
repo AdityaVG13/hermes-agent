@@ -360,6 +360,12 @@ def begin_iteration(
         _apply_active_turn_redirect, _review_input_budget_exhausted
     )
 
+    # Once per session, fail-open: warn if this route's fleet history is
+    # structurally uncached (see agent/cache_route_guard.py).
+    from agent.cache_route_guard import check_session_route
+
+    check_session_route(agent)
+
     def _verdict(action: str) -> IterationStart:
         return IterationStart(
             action=action, original_user_message=original_user_message,
