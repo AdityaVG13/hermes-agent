@@ -1060,6 +1060,34 @@ def _emit_tool_complete_and_risk(agent, ref: _ToolCallRef, result, risk_metadata
         )
 
 
+def _context_gauge_note(agent) -> str:
+    """The context gauge footer: the provider-priced size (usage anchor prompt+completion
+    tokens) of the request that spawned this tool batch — the number the model needs to
+    see its own budget climb and act before trimming instead of discovering silent
+    eviction by failure. Stamped once at result construction and append-only thereafter,
+    so a row's bytes never change (the outbound byte-stability law). Empty when the
+    anchor is absent or zero: a made-up estimate would lie about the budget.
+    """
+    anchor = getattr(agent, "_usage_anchor", None)
+    if not isinstance(anchor, dict):
+        return ""
+    try:
+        n = int(anchor.get("prompt_tokens") or 0) + int(anchor.get("completion_tokens") or 0)
+    except (TypeError, ValueError):
+        return ""
+    return f"[context {n} tokens]" if n > 0 else ""
+
+
+def _append_gauge_to_tool_message(tool_message: dict, note: str) -> None:
+    """Append the gauge outside any untrusted-data wrapper (like plugin notes): a string
+    content grows by one trailing line; a multimodal list gains a trailing text part."""
+    content = tool_message.get("content")
+    if isinstance(content, str):
+        tool_message["content"] = f"{content}\n{note}"
+    elif isinstance(content, list):
+        tool_message["content"] = [*content, {"type": "text", "text": note}]
+
+
 def _commit_tool_result(
     agent,
     messages: list,
@@ -1148,6 +1176,11 @@ def _commit_tool_result(
     # are told on this new row (outside any untrusted-data wrapper).
     lsp_deferred.forward_to_agent(agent)
     plugin_live_notes.attach_to_tool_message(agent, tool_message)
+    # Context gauge, same placement rule as plugin notes: outside the wrapper, appended
+    # once at construction, never rewritten (byte-stable row).
+    gauge_note = _context_gauge_note(agent)
+    if gauge_note:
+        _append_gauge_to_tool_message(tool_message, gauge_note)
     # Prepare presentation data before the append. The emitting completion callback
     # stays below the durability fence; raw tool/model content remains unchanged.
     prepare_metadata = getattr(agent, "tool_result_metadata_callback", None)
