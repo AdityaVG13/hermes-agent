@@ -1316,6 +1316,24 @@ def _sanitize_model_for(agent: Any, moa_config: Any) -> Any:
     return _sanitize_model
 
 
+def _effective_system_with_briefcase(
+    active_system_prompt: Any, briefcase: str | None, ephemeral: Any
+) -> str:
+    """Stable prompt + static briefcase + volatile ephemeral, in that order.
+
+    The pinned-skills briefcase is byte-stable per content revision, so it goes
+    between the session-stable prompt and the per-turn ephemeral add — ephemeral
+    churn must never shift the briefcase's token position (prompt-cache
+    campaign: skill bodies shared across sessions by the prefix cache).
+    """
+    effective = str(active_system_prompt or "")
+    if briefcase:
+        effective = (effective + "\n\n" + briefcase).strip()
+    if ephemeral:
+        effective = (effective + "\n\n" + str(ephemeral)).strip()
+    return effective
+
+
 def build_api_messages(
     agent: Any, messages: list[dict[str, Any]], *, current_turn_user_idx: Any,
     ext_prefetch_cache: Any, plugin_user_context: Any, moa_config: Any, active_system_prompt: Any,
@@ -1421,12 +1439,22 @@ def build_api_messages(
     from agent.anthropic_thinking_replay import apply_rejected_thinking_suppression
     apply_rejected_thinking_suppression(agent, api_messages)
 
-    # Final system message = cached prompt + ephemeral additions (API-time only).
-    # Plugin/recall context goes into the user message, never the system prompt: the
-    # prompt is built ONCE per session and replayed verbatim (stable cache prefix).
-    effective_system = active_system_prompt or ""
-    if agent.ephemeral_system_prompt:
-        effective_system = (effective_system + "\n\n" + agent.ephemeral_system_prompt).strip()
+    # Final system message = cached prompt + static briefcase + ephemeral additions
+    # (API-time only). Plugin/recall context goes into the user message, never the
+    # system prompt: the prompt is built ONCE per session and replayed verbatim
+    # (stable cache prefix). The pinned-skills briefcase is the one sanctioned
+    # static append — content-stable across sessions so the prefix cache serves
+    # it everywhere; it sits before the ephemeral tail so ephemeral churn cannot
+    # shift its bytes (see _effective_system_with_briefcase).
+    _briefcase: str | None = None
+    try:
+        from agent.skill_briefcase import build_briefcase_block
+
+        _briefcase = build_briefcase_block()
+    except Exception:
+        _briefcase = None
+    effective_system = _effective_system_with_briefcase(
+        active_system_prompt, _briefcase, agent.ephemeral_system_prompt)
     if effective_system:
         api_messages = [{"role": "system", "content": effective_system}] + api_messages
     return api_messages, effective_system

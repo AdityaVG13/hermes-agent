@@ -988,6 +988,30 @@ def skill_view(
             return _serve_skill_file(
                 skill_dir, file_path, name, list_available=True, mark_read=True,
                 hint="Use a relative path within the skill directory")
+        # Pinned-briefcase short-circuit: the SKILL.md body already rides the
+        # system prompt (byte-stable, prefix-cached across sessions) — re-serving
+        # it here would re-bill the exact bytes as fresh input (prompt-cache
+        # campaign: 1,038 full re-loads of one skill in 14d). Reference files
+        # above are unaffected; only the body stubs.
+        try:
+            from agent.skill_briefcase import is_pinned
+
+            if skill_md is not None and is_pinned(resolved_name):
+                try:
+                    short_rel = str(skill_md.relative_to(active_skills_dir))
+                except ValueError:
+                    short_rel = str(skill_md)
+                return _json({
+                    "success": True, "name": resolved_name, "pinned": True,
+                    "description": frontmatter.get("description", ""),
+                    "path": short_rel, "skill_dir": str(skill_dir) if skill_dir else None,
+                    "linked_files": _skill_linked_files(skill_dir) or None,
+                    "message": (
+                        "This skill's SKILL.md is pre-loaded in full in your system context "
+                        "(pinned briefcase) — do not re-read it. Use file_path for "
+                        "references/templates only.")})
+        except Exception:
+            pass  # briefcase unavailable: serve the body normally
         # tags/related_skills: metadata.hermes.* (agentskills.io) first, then top-level.
         metadata = frontmatter.get("metadata")
         hermes_meta = (metadata.get("hermes", {}) or {}) if isinstance(metadata, dict) else {}
