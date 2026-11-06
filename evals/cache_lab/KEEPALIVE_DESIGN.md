@@ -1,8 +1,17 @@
 # Keepalive design — reaching the human-paced TTL pool
 
-Status: DESIGN, not yet runtime. Evidence and economics below; the build
-decision belongs to the account owner because it adds API calls to
-subscription lanes.
+Status: **DO NOT BUILD — killed by observed bounding (2026-11-05).**
+
+Verdict: the replay-projected pool (2.85G tokens) inflated real prompts on
+uncompacted monster sessions. Bounded by *observed* uncached spend instead:
+codex 14d has 467M uncached total, of which post-gap calls carry only
+**2.33M tokens** (1,027 of 40,697 calls) — ≈52 credits at the published
+card (cached = 0.1× input). Pings would cost more than they save; the
+meter read 0% with ~190 credits spent since the window reset, confirming
+per-gap refills are trivially small. Lab lesson recorded in
+counterfactual.py: stream-replay RATIOS are calibrated (gate-passed), but
+ABSOLUTE token-savings projections must be bounded by observed
+session_model_usage input_tokens.
 
 ## The pool (measured, 14d, 268 codex sessions)
 
