@@ -61,7 +61,8 @@ def _absorbed(raw: str | None) -> list[str]:
 
 
 def read_session_calls(db: sqlite3.Connection, session_id: str,
-                       *, tool_schema_tokens: float = TOOL_SCHEMA_TOKENS) -> list[ReplayedCall]:
+                       *, tool_schema_tokens: float = TOOL_SCHEMA_TOKENS,
+                       token_overrides: dict[str, float] | None = None) -> list[ReplayedCall]:
     """Reconstruct per-call prompt size and cached-prefix share for one session.
 
     Streams are uid lists; a summary row replaces the uid range it absorbed at
@@ -81,29 +82,37 @@ def read_session_calls(db: sqlite3.Connection, session_id: str,
         " FROM messages WHERE session_id = ? ORDER BY id", (session_id,)).fetchall()
 
     uids: list[str] = []
-    tok: dict[str, float] = {}
+    toks: list[float] = []   # per-occurrence tokens, parallel to uids: the same
+    # uid can legitimately appear twice (re-delivered messages), and a dict-keyed
+    # size map would undercount the total while the LCP walk counts every
+    # occurrence — cached could exceed total. Streams are pairs, not a map.
     calls: list[ReplayedCall] = []
     prev_uids: list[str] | None = None
+    prev_toks: list[float] = []
     prev_ts: float | None = None
 
     for row_id, role, content, tool_calls, ts, uid, absorbed_raw, is_summary in rows:
         row_uid = _uid(row_id, uid)
         tokens = _row_tokens({"content": content, "tool_calls": tool_calls})
+        if token_overrides and row_uid in token_overrides:
+            # Counterfactual policies (e.g. read-stub collapse) rewrite this
+            # row's size; the replay then flows the smaller history through.
+            tokens = float(token_overrides[row_uid])
 
         # A compression summary is not a main-lane model call (it runs on the
         # compaction lane); it only rewrites the stream.
         if role == "assistant" and not is_summary:
             # The call happens with the stream as it stands BEFORE this row
             # (this row is the response). Prompt = system + tools + stream.
-            prompt = system_tokens + sum(tok.values())
+            prompt = system_tokens + sum(toks)
             if prev_uids is None:
                 lcp_tokens = 0.0
             else:
                 shared = 0.0
-                for a, b in zip(prev_uids, uids):
+                for a, t, b, u in zip(prev_uids, prev_toks, uids, toks):
                     if a != b:
                         break
-                    shared += tok.get(a, 0.0)
+                    shared += t
                 # system + tool schemas precede the stream and never change
                 # inside a session, so they are always part of the served prefix
                 lcp_tokens = system_tokens + shared
@@ -112,22 +121,24 @@ def read_session_calls(db: sqlite3.Connection, session_id: str,
                 gap_seconds=(float(ts) - prev_ts) if prev_ts is not None else 0.0,
                 prompt_tokens=prompt, cached_prefix_tokens=lcp_tokens))
             prev_uids = list(uids)
+            prev_toks = list(toks)
             prev_ts = float(ts)
 
         if is_summary:
             gone = _absorbed(absorbed_raw)
             insert_at = len(uids)
             for g in gone:
-                if g in uids:
-                    insert_at = min(insert_at, uids.index(g))
-                    uids.remove(g)
-                    tok.pop(g, None)
+                while g in uids:
+                    i = uids.index(g)
+                    insert_at = min(insert_at, i)
+                    uids.pop(i)
+                    toks.pop(i)
             uids.insert(insert_at, row_uid)
-            tok[row_uid] = tokens
+            toks.insert(insert_at, tokens)
         elif role != "assistant" or tokens:
             # Assistant responses join the stream for the NEXT call too.
             uids.append(row_uid)
-            tok[row_uid] = tokens
+            toks.append(tokens)
 
     return calls
 
