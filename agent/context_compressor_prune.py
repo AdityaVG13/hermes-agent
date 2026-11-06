@@ -22,6 +22,66 @@ def _cc():
     return context_compressor
 
 
+_PRUNE_MANIFEST_MAX_NAMES = 6
+
+
+def _stamp_eviction_manifest(messages: list, pruned_msgs: list) -> bool:
+    """Append one deterministic manifest line to the first row this pass rewrote.
+
+    The model reads the transcript top-down, so the line sits where the pruned zone
+    begins — the model meets the eviction as a named event (``[pruned: N results
+    elided (tool×k, …) — originals in session history; recover with session_search]``)
+    instead of discovering silent loss by failure. Rides an existing row's content:
+    the in-place commit requires equal row counts, so no new row may be added.
+    Identical inputs stamp identical bytes; ``False`` when nothing changed or the
+    first changed row's content is not a string (never corrupt a multimodal part
+    list to place a manifest).
+    """
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+
+    def _content(row):
+        return row.get("content") if isinstance(row, dict) else None
+
+    ignored = (_DB_PERSISTED_MARKER, "_row_id")
+
+    def _same(o, p) -> bool:
+        if not isinstance(o, dict) or not isinstance(p, dict):
+            return o is p
+        return (
+            {k: v for k, v in o.items() if k not in ignored}
+            == {k: v for k, v in p.items() if k not in ignored}
+        )
+
+    if len(messages) != len(pruned_msgs):
+        return False
+    changed = [
+        (i, o) for i, (o, p) in enumerate(zip(messages, pruned_msgs))
+        if not _same(o, p)
+    ]
+    if not changed:
+        return False
+    counts: dict[str, int] = {}
+    for _, o in changed:
+        name = ""
+        if isinstance(o, dict):
+            name = str(o.get("name") or o.get("tool_name") or o.get("role") or "?")
+        counts[name] = counts.get(name, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    listed = ", ".join(f"{name}×{n}" for name, n in ranked[:_PRUNE_MANIFEST_MAX_NAMES])
+    if len(ranked) > _PRUNE_MANIFEST_MAX_NAMES:
+        listed += f", +{len(ranked) - _PRUNE_MANIFEST_MAX_NAMES} more"
+    manifest = (
+        f"[pruned: {len(changed)} results elided ({listed}) — "
+        f"originals in session history; recover with session_search]"
+    )
+    first_idx = changed[0][0]
+    content = _content(pruned_msgs[first_idx])
+    if not isinstance(content, str):
+        return False
+    pruned_msgs[first_idx]["content"] = f"{content}\n{manifest}"
+    return True
+
+
 class ProactivePruneMixin:
     """``ContextCompressor`` mixin: the deterministic, no-LLM tool-result prune and its commit."""
 
@@ -77,6 +137,9 @@ class ProactivePruneMixin:
         )
         from agent.context_compressor_tail import with_pruned_row_skill_safety_rule
         pruned_msgs = with_pruned_row_skill_safety_rule(messages, pruned_msgs)
+        # The pass names itself on the first row it rewrote: the model meets the
+        # eviction as an event, not as silent loss (byte-deterministic line).
+        _stamp_eviction_manifest(messages, pruned_msgs)
         if not pruned_count:
             # No-op contract: return the INPUT object so callers can gate on `result is not input`.
             self._warn_reclamation_no_op("prune:nothing_eligible", current_tokens)
