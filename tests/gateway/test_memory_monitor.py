@@ -37,3 +37,27 @@ def test_stop_ends_monitoring():
     assert mm.is_running() is False
 
 
+def test_rss_is_current_not_the_high_water_mark(monkeypatch):
+    """ru_maxrss only ever rises, so reporting it as ``rss`` hid every release."""
+    import resource
+
+    class _StandingPeak:
+        ru_maxrss = 64 * 1024 * 1024 * 1024  # 64 GiB peak already reached
+
+    monkeypatch.setattr(resource, "getrusage", lambda *_a, **_k: _StandingPeak())
+    rss = mm._get_rss_mb()
+    if rss is None:
+        pytest.skip("no current-RSS source on this host")
+    assert isinstance(rss, int) and rss < 1024 * 1024, (
+        "rss must be the current resident size, not a high-water mark")
+
+
+def test_log_line_separates_current_rss_from_peak(caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="gateway.memory_monitor"):
+        mm.log_memory_usage(prefix="baseline")
+    message = next(r.getMessage() for r in caplog.records if "[MEMORY]" in r.getMessage())
+    assert "rss=" in message and "peak=" in message, message
+
+

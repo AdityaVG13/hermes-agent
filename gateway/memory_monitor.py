@@ -2,9 +2,12 @@
 
 Emits one grep-friendly ``[MEMORY] ...`` line every N seconds (default 300)
 from a daemon thread so slow leaks show up as an RSS time series in the logs.
-A baseline snapshot is logged on start and a final one on stop.  Uses stdlib
-``resource`` first, ``psutil`` as fallback (Windows); if neither works the
-monitor warns once and stays disabled.
+A baseline snapshot is logged on start and a final one on stop.
+
+Reports *current* RSS (psutil, else /proc/self/statm, else proc_pid_rusage) plus the
+high-water mark as a separate ``peak=`` field.  The old implementation reported
+``ru_maxrss`` as "rss", which is a peak that only ever rises — a release like 9.5 GB back
+down to 2.7 GB was invisible in the series.
 """
 
 from __future__ import annotations
@@ -28,29 +31,65 @@ _start_time: Optional[float] = None
 _lock = threading.Lock()
 
 
-def _get_rss_mb() -> Optional[int]:
-    """Return process RSS high-water mark in MB, or None if unavailable."""
-    try:
-        import resource
+def _darwin_resident_mb() -> Optional[int]:
+    """Current RSS via proc_pid_rusage without psutil (RUSAGE_INFO_V4 layout)."""
+    import ctypes
 
-        # ru_maxrss is KB on Linux but bytes on macOS.
-        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (_BYTES_TO_MB if sys.platform == "darwin" else 1024))
-    except Exception:
-        pass
+    pid = os.getpid()
+    buf = ctypes.create_string_buffer(256)
+    libc = ctypes.CDLL(None, use_errno=True)
+    # int proc_pid_rusage(int pid, int flavor, rusage_info_t *buffer); flavor 4 = V4.
+    if libc.proc_pid_rusage(pid, 4, ctypes.byref(buf)) != 0:
+        return None
+    # ri_resident_size sits at byte offset 64: uuid(16) + five uint64 counters.
+    return int(int.from_bytes(buf.raw[64:72], sys.byteorder) / _BYTES_TO_MB)
+
+
+def _get_rss_mb() -> Optional[int]:
+    """Current resident set size in MB, or None if unavailable.
+
+    Never ``ru_maxrss``: that is the high-water mark, so a series built on it can only
+    climb and cannot show a release.
+    """
     try:
         import psutil  # type: ignore
 
         return int(psutil.Process(os.getpid()).memory_info().rss / _BYTES_TO_MB)
     except Exception:
+        pass
+    try:
+        if sys.platform.startswith("linux"):
+            with open("/proc/self/statm", "r", encoding="ascii") as handle:
+                resident_pages = int(handle.read().split()[1])
+            return int(resident_pages * os.sysconf("SC_PAGE_SIZE") / _BYTES_TO_MB)
+        if sys.platform == "darwin":
+            return _darwin_resident_mb()
+    except Exception:
+        pass
+    return None
+
+
+def _get_peak_rss_mb() -> Optional[int]:
+    """High-water-mark RSS in MB (reported separately from current RSS)."""
+    try:
+        import resource
+
+        value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # ru_maxrss is KB on Linux but bytes on macOS.
+        return int(value / (_BYTES_TO_MB if sys.platform == "darwin" else 1024))
+    except Exception:
         return None
 
 
 def log_memory_usage(prefix: str = "") -> None:
-    """Log ``[MEMORY] [<prefix> ]rss=... gc=... threads=... uptime=...``; safe from any thread."""
+    """Log ``[MEMORY] [<prefix> ]rss=... peak=... gc=... threads=... uptime=...``; safe from any thread."""
     rss = _get_rss_mb()
+    peak = _get_peak_rss_mb()
     logger.info(
-        "[MEMORY] %srss=%s gc=%s threads=%d uptime=%ds", f"{prefix} " if prefix else "",
-        "unavailable" if rss is None else f"{rss}MB", gc.get_count(), threading.active_count(),
+        "[MEMORY] %srss=%s peak=%s gc=%s threads=%d uptime=%ds", f"{prefix} " if prefix else "",
+        "unavailable" if rss is None else f"{rss}MB",
+        "unavailable" if peak is None else f"{peak}MB",
+        gc.get_count(), threading.active_count(),
         int(time.monotonic() - _start_time) if _start_time else 0,
     )
 

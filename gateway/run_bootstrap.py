@@ -501,6 +501,11 @@ async def _start_gateway_shutdown_tail(
         logger.warning("Cron ticker did not exit within %.0fs of shutdown — an in-flight "
                        "delivery may have been dropped.", _CRON_SHUTDOWN_DRAIN_TIMEOUT)
     await _await_thread_exit(housekeeping_thread, timeout=_HOUSEKEEPING_SHUTDOWN_DRAIN_TIMEOUT)
+    try:
+        from gateway.memory_monitor import stop_memory_monitoring
+        stop_memory_monitoring()
+    except Exception:
+        logger.debug("Memory monitor did not stop cleanly", exc_info=True)
 
     # Stop the planned-stop watcher (daemon=True so this is belt-and-suspenders).
     _planned_stop_watcher_stop.set()
@@ -872,6 +877,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
         cron_stop, cron_provider, cron_thread, housekeeping_thread = (
             _start_gateway_start_cron_and_housekeeping(runner))
+        # RSS time series in the gateway log (current RSS, not the high-water mark).
+        try:
+            from gateway.memory_monitor import start_memory_monitoring
+            start_memory_monitoring()
+        except Exception:
+            logger.debug("Memory monitor did not start", exc_info=True)
         # From here every exit (a READY publication that raises included) runs the shutdown tail,
         # which stops the cron ticker and housekeeping before the adapters they deliver through close.
         from gateway.run_runtime import publish_gateway_runtime_ready, wait_gateway_runtime
