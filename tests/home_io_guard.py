@@ -47,6 +47,9 @@ _INTERPRETER_PREFIXES = tuple({
 # Windows; ``os.path.normcase`` (identity on POSIX) reproduces that for string compares. Prefixes
 # resolve once at import, as before: they are fixed for the process lifetime.
 _normcase = os.path.normcase
+# The sealed-payload probe target beside this checkout (see check() for why it is
+# reads-only allowed): pm install discovery, never applied Hermes state.
+_PAYLOAD_PROBE_MANIFEST = Path(__file__).resolve().parent.parent.parent / "manifest.json"
 _INTERPRETER_PREFIX_STRS = tuple(_normcase(os.fspath(p)) for p in _INTERPRETER_PREFIXES)
 
 
@@ -97,6 +100,15 @@ class HomeIOGuard:
             # link to compare inode identity); resolving it names whatever file that fd holds,
             # which is not I/O against the home.
             if metadata and (absolute == "/proc" or absolute.startswith("/proc" + os.sep)):
+                return
+            # pm/environments._payload_manifest probes <checkout>/../manifest.json for a
+            # sealed-payload marker beside the tree. install.sh's default layout
+            # (INSTALL_DIR=$HERMES_HOME/hermes-agent) puts the checkout inside the home, so the
+            # probe lands on the home root — where a manifest, if present, belongs to another
+            # install: the probe compares it and never applies it. Refusing the attempt makes
+            # every run_agent-importing test fail on a default-install layout, so the one
+            # probe file is allowed for reads only; everything else in the home stays guarded.
+            if not destructive and absolute == _normcase(os.fspath(_PAYLOAD_PROBE_MANIFEST)):
                 return
             resolved = self._refuse_installed_app_change(value, absolute) if destructive else None
             roots = tuple(_normcase(os.fspath(r)) for r in self.roots())
