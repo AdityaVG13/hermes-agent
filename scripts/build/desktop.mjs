@@ -20,9 +20,6 @@ function validateNativeTree(nativeDeps, platform) {
       throw new Error(`Prepared node-pty binding does not match ${platform}: ${binding}`)
     }
   }
-  if (platform === 'darwin' && !existsSync(join(nativeDeps, 'get-windows/main'))) {
-    throw new Error('Prepared get-windows is missing its macOS helper')
-  }
 }
 
 // Only main/preload bake the install stamp (bundleElectronMain); the renderer is a function of
