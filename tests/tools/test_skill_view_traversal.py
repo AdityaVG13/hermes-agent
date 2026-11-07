@@ -5,6 +5,8 @@ reading arbitrary files (e.g., ~/.hermes/.env) via path traversal.
 """
 
 import json
+import os
+
 import pytest
 from unittest.mock import patch
 
@@ -123,3 +125,50 @@ class TestPathTraversalBlocked:
         assert result["success"] is False
         assert "sk-do-not-leak" not in result.get("content", "")
         assert "sk-do-not-leak" not in json.dumps(result)
+
+
+class TestDefaultViewSymlinks:
+    """The DEFAULT view (SKILL.md body) read had no containment check.
+
+    Found live 2026-11-07 by the adversarial rig: skills/escaper/SKILL.md ->
+    /etc/passwd served passwd's content. The file_path path was guarded
+    (validate_within_dir resolves symlinks); the body read was not."""
+
+    def test_default_view_blocks_symlinked_skill_md(self, fake_skills):
+        secret = fake_skills["tmp_path"] / "outside-secret.md"
+        secret.write_text("ROOT:0:0: TOP SECRET BODY\n")
+        # overwrite the real SKILL.md with a symlink to the secret
+        (fake_skills["skill_dir"] / "SKILL.md").unlink()
+        os.symlink(secret, fake_skills["skill_dir"] / "SKILL.md")
+        result = json.loads(skill_view("test-skill"))
+        assert result.get("success") is False, result
+        assert "TOP SECRET BODY" not in json.dumps(result)
+
+    def test_skill_dir_symlink_stays_loadable_but_nested_escape_refuses(self, fake_skills):
+        # A symlinked skill DIRECTORY is a supported fleet pattern (gtnh-shorts
+        # -> repo/tools/shorts/skill): its own real SKILL.md must serve.
+        outside = fake_skills["tmp_path"] / "evil-skill"
+        outside.mkdir()
+        (outside / "SKILL.md").write_text("---\nname: legit-linked\ndescription: e\n---\nLEGIT LINKED BODY\n")
+        (outside / "escape.md").write_text("SECOND SECRET\n")
+        (fake_skills["skills_dir"] / "sneaky").symlink_to(outside)
+        result = json.loads(skill_view("sneaky"))
+        assert result.get("success") is True, result
+        assert "LEGIT LINKED BODY" in json.dumps(result)
+        # but a SKILL.md symlink planted INSIDE any dir still refuses
+        secret2 = fake_skills["tmp_path"] / "outside-secret2.md"
+        secret2.write_text("TOP SECRET NUMBER TWO\n")
+        (outside / "SKILL.md").unlink()
+        os.symlink(secret2, outside / "SKILL.md")
+        result = json.loads(skill_view("sneaky"))
+        assert result.get("success") is False, result
+        assert "TOP SECRET NUMBER TWO" not in json.dumps(result)
+
+    def test_file_serve_blocked_when_skill_dir_itself_escapes(self, fake_skills):
+        outside = fake_skills["tmp_path"] / "evil-refs"
+        outside.mkdir()
+        (outside / "passwd.txt").write_text("root:x:0:0\n")
+        (fake_skills["skill_dir"] / "refs-link").symlink_to(outside)
+        result = json.loads(skill_view("test-skill", file_path="refs-link/passwd.txt"))
+        assert result.get("success") is False, result
+        assert "root:x" not in json.dumps(result)

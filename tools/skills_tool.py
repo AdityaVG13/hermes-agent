@@ -979,6 +979,17 @@ def skill_view(
         error, skill_dir, skill_md = locate_skill(name, local_category_name, roots)
         if error is not None:
             return error
+        # Symlink containment, fail-closed (live escape found 2026-11-07): the
+        # file_path serves validate_within_dir-resolve already; the DEFAULT view
+        # read did not. SKILL.md itself must resolve inside its own directory —
+        # a symlinked SKILL.md pointing at ~/.hermes/.env (or /etc/passwd) must
+        # refuse, not serve. A symlinked skill DIRECTORY is a supported pattern
+        # (gtnh-shorts et al) and stays loadable; its own files are still
+        # per-file guarded by _serve_skill_file.
+        from tools.path_security import validate_within_dir
+        if skill_md is not None and (
+                md_escape := validate_within_dir(skill_md, skill_dir or skill_md.parent)):
+            return _fail(f"Skill '{name}': SKILL.md {md_escape}", hint=_LOOKUP_HINT)
         try:  # read once — reused for platform check and main content
             content = _read_skill_text(skill_md)
         except Exception as e:

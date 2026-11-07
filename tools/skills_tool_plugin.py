@@ -158,6 +158,11 @@ def _serve_plugin_skill(
     qualified_name = f"{namespace}:{bare}"
     if disabled := sorted(plugin_skill_owners(get_plugin_manager(), qualified_name) & _get_disabled_plugins()):
         return _fail(f"Plugin '{disabled[0]}' is disabled. Re-enable with: hermes plugins enable {disabled[0]}")
+    # Same symlink containment as the local default view (2026-11-07 escape):
+    # a plugin skill's SKILL.md must resolve inside its own directory.
+    from tools.path_security import validate_within_dir
+    if md_escape := validate_within_dir(skill_md, skill_md.parent):
+        return _fail(f"Skill '{qualified_name}': SKILL.md {md_escape}")
     try:
         content = _read_skill_text(skill_md)
     except Exception as e:
