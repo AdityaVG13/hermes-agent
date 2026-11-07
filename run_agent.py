@@ -1314,6 +1314,10 @@ class AIAgent(
         tool_calls = assistant_message.tool_calls
         args = (assistant_message, messages, effective_task_id, api_call_count)
         self._executing_tools = True  # allow _vprint during tool execution even with stream consumers
+        # The batching nudge's authority: the in-flight assistant row is NOT in
+        # `messages` during commits (the executor holds it beside the list), so
+        # the current turn's call count travels here. Cleared on exit.
+        self._current_tool_batch_size = len(tool_calls)
         try:
             with scoped_connection_surface(agent_connection_surface(self)):
                 if len(tool_calls) <= 1:
@@ -1331,6 +1335,7 @@ class AIAgent(
                         execute_tool_calls_segmented(self, *args, segments=segments)
         finally:
             self._executing_tools = False
+            self._current_tool_batch_size = None
         # getattr: test stubs built without _set_defaults drive this method too
         if getattr(self, "_trim_after_tool_batch", False):
             # Only on normal completion: every executor frame that held a >=1 MB raw result has

@@ -1107,7 +1107,7 @@ def _single_call_streak(messages) -> int:
 _BATCHING_NUDGE_AT = 3
 
 
-def _batching_nudge_note(messages, function_name: str, *, is_error: bool = False,
+def _batching_nudge_note(agent, messages, function_name: str, *, is_error: bool = False,
                          blocked: bool = False) -> Optional[str]:
     """One-shot structural hint when single-call turns stack up (2026-11-07).
 
@@ -1118,10 +1118,25 @@ def _batching_nudge_note(messages, function_name: str, *, is_error: bool = False
     four — a multi-call turn must reset the pattern first), silent on errors
     and blocked results (the model is mid-recovery), and silent when the call
     IS execute_code. Rides the gauge placement rule: appended once outside any
-    untrusted wrapper, never rewritten (byte-stable row)."""
+    untrusted wrapper, never rewritten (byte-stable row).
+
+    The in-flight turn's assistant row is NOT in ``messages`` during commits
+    (the executor holds it beside the list — live misfire 2026-11-07: a 3-call
+    batch turn got the hint), so ``agent._current_tool_batch_size`` — set by
+    ``_execute_tool_calls`` — is authoritative when present: a batch of 2+
+    executing right now never nags, and a single in flight counts as the
+    streak's newest member. Without it (replay/recovery callers) the
+    transcript alone decides."""
     if is_error or blocked or function_name == "execute_code":
         return None
-    if _single_call_streak(messages) != _BATCHING_NUDGE_AT:
+    batch_size = getattr(agent, "_current_tool_batch_size", None)
+    if batch_size is not None:
+        if batch_size >= 2:
+            return None  # a batch is executing right now — never nag it
+        streak = 1 + _single_call_streak(messages)
+    else:
+        streak = _single_call_streak(messages)
+    if streak != _BATCHING_NUDGE_AT:
         return None
     return ("[batching hint] 3 consecutive single-call turns — each costs a full model round trip. "
             "Independent next steps: emit them as parallel calls in ONE response. "
@@ -1231,7 +1246,7 @@ def _commit_tool_result(
     gauge_note = _context_gauge_note(agent)
     if gauge_note:
         _append_gauge_to_tool_message(tool_message, gauge_note)
-    batching_note = _batching_nudge_note(messages, function_name, is_error=is_error, blocked=blocked)
+    batching_note = _batching_nudge_note(agent, messages, function_name, is_error=is_error, blocked=blocked)
     if batching_note:
         _append_gauge_to_tool_message(tool_message, batching_note)
     # Prepare presentation data before the append. The emitting completion callback

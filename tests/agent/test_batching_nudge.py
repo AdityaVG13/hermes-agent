@@ -56,31 +56,55 @@ class TestSingleCallStreak(unittest.TestCase):
 
 
 class TestBatchingNudgeNote(unittest.TestCase):
-    def test_fires_exactly_at_three(self):
-        msgs = transcript(1, 1, 1)
-        self.assertIsNotNone(_batching_nudge_note(msgs, "read_file"))
+    def _agent(self, batch_size=None):
+        a = type("A", (), {})()
+        if batch_size is not None:
+            a._current_tool_batch_size = batch_size
+        return a
+
+    def test_fires_on_the_third_singles_own_result(self):
+        # in-flight turn IS the 3rd single: 2 completed + this one
+        a = self._agent(batch_size=1)
+        self.assertIsNotNone(_batching_nudge_note(a, transcript(1, 1), "read_file"))
+
+    def test_never_nags_a_batch_in_progress(self):
+        # live misfire (2026-11-07): a 3-call batch turn got the hint on its 3rd
+        # result because the in-flight assistant row isn't in `messages` yet.
+        a = self._agent(batch_size=3)
+        self.assertIsNone(_batching_nudge_note(a, transcript(1, 1, 1), "read_file"))
 
     def test_silent_below_three(self):
-        self.assertIsNone(_batching_nudge_note(transcript(1, 1), "read_file"))
+        a = self._agent(batch_size=1)
+        self.assertIsNone(_batching_nudge_note(a, transcript(1), "read_file"))
 
     def test_silent_past_three_until_reset(self):
-        # fires at exactly 3 — a 4th single turn must not re-fire
-        self.assertIsNone(_batching_nudge_note(transcript(1, 1, 1, 1), "read_file"))
+        # fires at exactly 3 — the 4th single in a row must not re-fire
+        a = self._agent(batch_size=1)
+        self.assertIsNone(_batching_nudge_note(a, transcript(1, 1, 1), "read_file"))
 
     def test_execute_code_turns_never_nudge(self):
-        self.assertIsNone(_batching_nudge_note(transcript(1, 1, 1), "execute_code"))
+        a = self._agent(batch_size=1)
+        self.assertIsNone(_batching_nudge_note(a, transcript(1, 1), "execute_code"))
 
     def test_error_and_blocked_results_stay_silent(self):
-        msgs = transcript(1, 1, 1)
-        self.assertIsNone(_batching_nudge_note(msgs, "read_file", is_error=True))
-        self.assertIsNone(_batching_nudge_note(msgs, "read_file", blocked=True))
+        a = self._agent(batch_size=1)
+        msgs = transcript(1, 1)
+        self.assertIsNone(_batching_nudge_note(a, msgs, "read_file", is_error=True))
+        self.assertIsNone(_batching_nudge_note(a, msgs, "read_file", blocked=True))
 
     def test_note_text_is_deterministic_and_names_both_paths(self):
-        msgs = transcript(1, 1, 1)
-        n1, n2 = _batching_nudge_note(msgs, "read_file"), _batching_nudge_note(msgs, "read_file")
+        a = self._agent(batch_size=1)
+        msgs = transcript(1, 1)
+        n1, n2 = _batching_nudge_note(a, msgs, "read_file"), _batching_nudge_note(a, msgs, "read_file")
         self.assertEqual(n1, n2)
         self.assertIn("parallel", n1)
         self.assertIn("execute_code", n1)
+
+    def test_fallback_without_batch_attr_uses_transcript_only(self):
+        # replay/recovery callers may not set _current_tool_batch_size
+        a = self._agent()
+        self.assertIsNotNone(_batching_nudge_note(a, transcript(1, 1, 1), "read_file"))
+        self.assertIsNone(_batching_nudge_note(a, transcript(1, 1), "read_file"))
 
     def test_attaches_outside_wrapper_like_the_gauge(self):
         msg = {"role": "tool", "content": "{\"ok\": true}", "tool_call_id": "c0"}
