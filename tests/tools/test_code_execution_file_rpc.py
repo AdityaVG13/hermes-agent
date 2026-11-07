@@ -16,7 +16,7 @@ from tools.code_execution_rpc import _rpc_poll_loop
 CALLS = {
     "web_search": {"query": "fixture", "limit": 3},
     "web_extract": {"urls": ["https://example.test"], "char_limit": 3000},
-    "read_file": {"path": "reference", "offset": 2, "limit": 4},
+    "read_file": {"path": "reference", "offset": 2, "limit": 4, "if_hash": ""},
     "write_file": {"path": "output", "content": "café", "cross_profile": False},
     "search_files": {"pattern": "x", "target": "files", "path": ".", "file_glob": "*.py",
                      "limit": 4, "offset": 2, "output_mode": "count", "context": 3, "order": "modified"},

@@ -42,6 +42,7 @@ SANDBOX_AVAILABLE = True
 # Tools allowed inside the sandbox; ∩ the session's enabled tools decides which stubs are generated.
 SANDBOX_ALLOWED_TOOLS = frozenset([
     "web_search", "web_extract", "read_file", "write_file", "search_files", "patch", "terminal",
+    "asgrep_search", "asgrep_read", "asgrep_status",
 ])
 
 # Resource limit defaults (overridable via config.yaml → code_execution.*)
@@ -141,6 +142,15 @@ _TOOL_STUBS = {
     "terminal": ("command: str, timeout: int = None, workdir: str = None",
         '"""Run a shell command (foreground only). Returns dict with "output" and "exit_code"."""',
         '{"command": command, "timeout": timeout, "workdir": workdir}'),
+    "asgrep_search": ("query: str, lang: str = None, file_filter: str = None, limit: int = 20, excerpt_lines: int = 0, semantic_only: bool = False",
+        '"""AST/semantic symbol search (index persists per repo, warms as you work). Returns dict with hits[] carrying refs like src/a.py#L12-L40; chain refs into asgrep_read(refs=[...])."""',
+        '{"query": query, "lang": lang, "file_filter": file_filter, "limit": limit, "excerpt_lines": excerpt_lines, "semantic_only": semantic_only}'),
+    "asgrep_read": ("refs: list, context_lines: int = 10, max_chars: int = 6000",
+        '"""Expand search refs (e.g. ["src/a.py#L12-L40"]) into exact bounded source. Returns dict with windows[]."""',
+        '{"refs": refs, "context_lines": context_lines, "max_chars": max_chars}'),
+    "asgrep_status": ("",
+        '"""Index readiness/counts for the workspace AST index (file_count, symbol_count, caller_count). Returns dict."""',
+        '{}'),
 }
 
 

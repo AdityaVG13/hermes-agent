@@ -987,3 +987,21 @@ class TestBatchingDefaultFraming(unittest.TestCase):
         from agent.prompt_builder import PARALLEL_TOOL_CALL_GUIDANCE
         self.assertIn("execute_code", PARALLEL_TOOL_CALL_GUIDANCE)
         self.assertIn("dependent", PARALLEL_TOOL_CALL_GUIDANCE)
+
+
+class TestAsgrepBridge(unittest.TestCase):
+    """2026-11-07: the AST index rides the kernel bridge — search+read chains are
+    exactly the dependent 3+-step flows code-batching exists for, and both are
+    pure in-process reads (ideal kernel citizens)."""
+
+    def test_asgrep_tools_allowlisted(self):
+        from tools.code_execution_tool import SANDBOX_ALLOWED_TOOLS
+        self.assertTrue({"asgrep_search", "asgrep_read", "asgrep_status"} <= SANDBOX_ALLOWED_TOOLS)
+
+    def test_generated_module_carries_asgrep_stubs(self):
+        from tools.code_execution_tool import generate_hermes_tools_module
+        src = generate_hermes_tools_module(["asgrep_search", "asgrep_read", "asgrep_status"])
+        for name in ("asgrep_search", "asgrep_read", "asgrep_status"):
+            self.assertIn(f"def {name}(", src)
+        self.assertIn('"query": query', src)
+        compile(src, "hermes_tools.py", "exec")
