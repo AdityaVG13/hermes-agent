@@ -62,31 +62,31 @@ VERIFY_SCHEMA = {
 }
 
 
-def _handle_verify(args, **kw):
-    root_arg = args.get("path")
+def _resolve_project_root(path_arg, kw) -> Path | None:
+    """Explicit path, else the session's cwd chain — read_file's precedence
+    (file_tools_paths): recorded session cwd, task override, scoped TERMINAL_CWD,
+    process cwd. Shared by verify and map so their defaults can never disagree."""
+    if path_arg:
+        return Path(path_arg).expanduser()
     root = None
-    if root_arg:
-        root = Path(root_arg).expanduser()
-    else:
-        # Default to the SESSION's cwd, not this process's — the gateway process
-        # sits somewhere unrelated to the workspace the model is working in. Same
-        # precedence read_file uses for relative paths (file_tools_paths): recorded
-        # session cwd, registered task override, scoped TERMINAL_CWD, process cwd.
-        with suppress(Exception):
-            from agent.runtime_cwd import scope_terminal_cwd
-            from tools.terminal_tool import get_session_cwd, resolve_task_overrides
-            key = kw.get("task_id")
-            for candidate in (get_session_cwd(key),
-                              resolve_task_overrides(key).get("cwd"),
-                              scope_terminal_cwd()):
-                text = str(candidate or "").strip()
-                if text:
-                    root = Path(text).expanduser()
-                    break
-        if root is None:
-            root = Path.cwd()
-    if not root.is_dir():
-        return {"error": f"verify: project root not found: {root_arg}"}
+    with suppress(Exception):
+        from agent.runtime_cwd import scope_terminal_cwd
+        from tools.terminal_tool import get_session_cwd, resolve_task_overrides
+        key = kw.get("task_id")
+        for candidate in (get_session_cwd(key),
+                          resolve_task_overrides(key).get("cwd"),
+                          scope_terminal_cwd()):
+            text = str(candidate or "").strip()
+            if text:
+                root = Path(text).expanduser()
+                break
+    return root if root is not None else Path.cwd()
+
+
+def _handle_verify(args, **kw):
+    root = _resolve_project_root(args.get("path"), kw)
+    if root is None or not root.is_dir():
+        return {"error": f"verify: project root not found: {args.get('path') or '(session cwd)'}"}
     from agent.coding_context import detect_project_facts
 
     commands = detect_project_facts(root).verify_commands
