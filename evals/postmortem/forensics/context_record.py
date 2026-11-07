@@ -191,10 +191,12 @@ def _handle(call: dict[str, Any], results: dict[str, dict[str, Any]]) -> tuple[s
     args = _args(call)
     res = results.get(str(call.get("id") or ""), {})
     parsed = res.get("json") or {}
-    if name == "read_file":
+    if name in ("read_file", "patch", "write_file"):
         path = str(args.get("path") or "")
         if not path:
             return None
+        if name != "read_file":
+            return ("f", path)
         start = int(args.get("offset") or 1)
         limit = int(args.get("limit") or 0)
         ref = path
@@ -204,16 +206,21 @@ def _handle(call: dict[str, Any], results: dict[str, dict[str, Any]]) -> tuple[s
             ref = f"{path}#L{start}-"
         digest = parsed.get("content_hash")
         return ("f", f"{ref} (hash {digest})" if digest else ref)
+    if name == "search_files":
+        pattern = " ".join(str(args.get("pattern") or "").split())
+        return ("q", pattern[:80]) if pattern else None
     if name == "skill_view":
         ref = str(parsed.get("ref") or args.get("name") or "")
         if not ref:
             return None
         digest = parsed.get("digest")
         return ("s", f"{ref} (digest {digest})" if digest else ref)
-    if name in ("terminal", "execute_code", "tool_call"):
+    if name in ("terminal", "execute_code"):
         spill = parsed.get("stdout_spill_path")
         if spill:
             return ("a", f"artifact: {spill}")
+        command = " ".join(str(args.get("command") or args.get("code") or "").split())
+        return ("c", command[:80]) if command else None
     return None
 
 
@@ -295,16 +302,20 @@ def build_record(
         records.pop(0)
         dropped += 1
 
-    handles: dict[str, str] = {}
+    seen: dict[str, dict[str, int]] = {"f": {}, "s": {}, "q": {}, "c": {}, "a": {}}
+    sequence = 0
     for batch in batches_:
         for call in batch.get("calls") or []:
             h = _handle(call, batch.get("results") or {})
             if h:
                 kind, value = h
-                handles[f"{kind}|{value}"] = value
-    f_handles = [v for k, v in handles.items() if k.startswith("f|")][-8:]
-    s_handles = [v for k, v in handles.items() if k.startswith("s|")][-4:]
-    a_handles = [v for k, v in handles.items() if k.startswith("a|")][-4:]
+                seen.setdefault(kind, {})[value] = sequence
+                sequence += 1
+    caps = {"f": 20, "s": 6, "q": 6, "c": 8, "a": 6}
+    handles = {
+        kind: [value for value, _ in sorted(hits.items(), key=lambda kv: kv[1])][-caps[kind]:]
+        for kind, hits in seen.items()
+    }
 
     results = sum(len(b.get("results") or {}) for b in batches_)
     chars = sum(len(str(b.get("text") or "")) for b in batches_)
@@ -336,7 +347,7 @@ def build_record(
         "done_dropped": dropped,
         "now": now,
         "next": next_step or "infer from GOAL",
-        "handles": {"f": f_handles, "s": s_handles, "a": a_handles},
+        "handles": handles,
         "loss": {"rows": len(rows), "results": results, "chars": chars, "recovery": recovery},
         "batches": len(batches_),
     }
@@ -379,6 +390,8 @@ def render_record(rec: dict[str, Any]) -> str:
     entries = (
         [("f", v) for v in handles.get("f") or []]
         + [("s", v) for v in handles.get("s") or []]
+        + [("q", v) for v in handles.get("q") or []]
+        + [("c", v) for v in handles.get("c") or []]
         + [("a", v) for v in handles.get("a") or []]
     )
     if entries:

@@ -48,7 +48,7 @@ def test_one_line_per_batch_and_now_is_the_last():
     assert "DONE (completed; do not repeat):" in text
     assert "1. read the fold — read_file — ok" in text or "1. read the fold" in text
     assert "LAST (done): run the lane" in text and "— ok" in text
-    assert "x.py#L10-39 (hash abc123)" in text
+    assert "evals/x.py#L10-39 (hash abc123)" in text
     assert "NEXT:" in text
 
 
