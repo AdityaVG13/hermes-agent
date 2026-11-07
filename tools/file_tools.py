@@ -1192,7 +1192,7 @@ READ_FILE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path)"},
+            "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path). Also accepts search-result line refs verbatim — 'src/a.py#L12-L40', 'src/a.py#L7', 'src/a.py:12' — and derives the offset/limit window from them; explicit offset/limit args win when given."},
             "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)", "default": 1, "minimum": 1},
             "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 2000, max: 2000). Reads are additionally capped at a ~100K-character budget with a next_offset continuation.", "default": DEFAULT_READ_LIMIT, "maximum": 2000},
             "if_hash": {"type": "string", "description": "A content_hash from an earlier read of this same region. When the current bytes still match it, you get {\"status\":\"unchanged\"} with no content re-sent; when they differ, full content returns.", "default": ""}
@@ -1343,9 +1343,50 @@ SEARCH_FILES_SCHEMA = {
 }
 
 
+_REF_RANGE_RE = re.compile(r"^(?P<path>.+?)(?P<sep>[:#])[Ll]?(?P<start>\d+)(?:-[Ll]?(?P<end>\d+))?$")
+
+
+def _parse_path_ref(ref):
+    """Split a line-range ref into ``(path, offset, span_limit)``.
+
+    Search results emit these handles — search_files prints ``path:line``,
+    asgrep hits carry ``path#L12-L40`` — and accepting them in ``path``
+    makes the find→read compound one verbatim call instead of an offset the
+    model must re-derive. Returns ``(ref, None, None)`` for anything that is
+    not a well-formed ref (Windows drive colons, L0, reversed ranges), so a
+    genuinely odd filename still reads.
+    """
+    if not ref or "\n" in ref:
+        return (ref, None, None)
+    m = _REF_RANGE_RE.match(ref.strip())
+    if not m:
+        return (ref, None, None)
+    start = int(m.group("start"))
+    if start < 1:
+        return (ref, None, None)
+    end = m.group("end")
+    if end is not None:
+        end_i = int(end)
+        if end_i < start:
+            return (ref, None, None)
+        return (m.group("path"), start, end_i - start + 1)
+    return (m.group("path"), start, None)
+
+
 def _handle_read_file(args, **kw):
     tid = kw.get("task_id") or "default"
-    return read_file_tool(path=args.get("path", ""), offset=args.get("offset", 1), limit=args.get("limit", DEFAULT_READ_LIMIT), task_id=tid)
+    path = args.get("path", "")
+    offset = args.get("offset", 1)
+    limit = args.get("limit", DEFAULT_READ_LIMIT)
+    clean, ref_offset, ref_limit = _parse_path_ref(path)
+    if clean != path:
+        # Explicit non-default args are deliberate and win per-dimension;
+        # the ref fills in whatever the call left at defaults.
+        if ref_offset is not None and offset == 1:
+            offset = ref_offset
+        if ref_limit is not None and limit == DEFAULT_READ_LIMIT:
+            limit = ref_limit
+    return read_file_tool(path=clean, offset=offset, limit=limit, task_id=tid)
 
 
 def _handle_write_file(args, **kw):
