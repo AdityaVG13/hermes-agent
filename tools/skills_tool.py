@@ -1169,15 +1169,15 @@ def _skill_view_with_bump(args, **kw):
                 and len(parsed["content"]) <= _HAND_PLACED_FLOOR):
             full_len = len(parsed["content"])
             body, truncated = _bound_skill_body(parsed["content"])
+            parsed["truncated"] = truncated  # explicit both ways: receipts read this flag
             if truncated:
                 parsed["content"] = body
-                parsed["truncated"] = True
                 parsed["total_chars"] = full_len
                 parsed["continuation"] = (
                     "Body bounded at 8000 chars for the model path; re-request the section "
                     "you need with file_path='SKILL.md#<heading>' (heading titles from the "
                     "first-view card), or file_path='SKILL.md#full' for the whole file.")
-                result = json.dumps(parsed, ensure_ascii=False)
+            result = json.dumps(parsed, ensure_ascii=False)
     with suppress(Exception):
         parsed = json.loads(result)
         if isinstance(parsed, dict) and parsed.get("success"):
