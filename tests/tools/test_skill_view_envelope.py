@@ -76,28 +76,52 @@ class TestIfDigest:
 
 
 class TestBodyBudget:
-    def test_model_path_body_bounded_with_continuation(self, tmp_path):
+    """The 8 KB model-path bound lives in _skill_view_with_bump (the model-facing
+    handler), NOT in skill_view() — the skill-ledger plugin's section/`#full`
+    server slices from the library call and must see full text."""
+
+    def _big_skill(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skill_dir = skills_dir / "big-skill"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
             "---\nname: big-skill\ndescription: big\n---\n\n# Body\n" + "x" * 20000
         )
-        with patch("tools.skills_tool.SKILLS_DIR", skills_dir):
+        return skills_dir
+
+    def test_library_serves_full_text_for_plugin_section_slicing(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", self._big_skill(tmp_path)):
             d = _load(skill_view("big-skill"))
+        assert len(d["content"]) > 20000
+        assert not d.get("truncated")
+
+    def test_handler_bounds_default_view_body(self, tmp_path):
+        from tools.skills_tool import _skill_view_with_bump
+
+        with patch("tools.skills_tool.SKILLS_DIR", self._big_skill(tmp_path)):
+            d = _load(_skill_view_with_bump({"name": "big-skill"}, task_id="t"))
         assert len(d["content"]) <= 8000
         assert d["truncated"] is True
         assert d["total_chars"] > 20000
         assert "SKILL.md#" in d["continuation"]
+        assert len(d["digest"]) == 16  # digest still identifies the FULL source
 
-    def test_slash_path_keeps_full_body(self, tmp_path):
+    def test_handler_respects_hand_placed_giant_contract(self, tmp_path):
+        from tools.skills_tool import _skill_view_with_bump
+
         skills_dir = tmp_path / "skills"
-        skill_dir = skills_dir / "big-skill"
+        skill_dir = skills_dir / "manual-giant"
         skill_dir.mkdir(parents=True)
         (skill_dir / "SKILL.md").write_text(
-            "---\nname: big-skill\ndescription: big\n---\n\n# Body\n" + "x" * 20000
+            "---\nname: manual-giant\ndescription: giant\n---\n\n# Body\n" + "x" * 150_000
         )
         with patch("tools.skills_tool.SKILLS_DIR", skills_dir):
+            d = _load(_skill_view_with_bump({"name": "manual-giant"}, task_id="t2"))
+        assert len(d["content"]) > 150_000
+        assert not d.get("truncated")
+
+    def test_slash_path_keeps_full_body(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", self._big_skill(tmp_path)):
             d = _load(skill_view("big-skill", preprocess=False))
         assert len(d["content"]) > 20000
         assert not d.get("truncated")

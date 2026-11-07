@@ -36,8 +36,11 @@ logger = logging.getLogger(__name__)
 # Compaction envelope carve-out: content ABOVE the storage-governance ceiling is
 # hand-placed by the owner and reads in full by contract (see
 # test_skill_size_limits.py TestHandPlacedSkillsNoLimit); the model-path body
-# bound applies only to governed sizes.
-_HAND_PLACED_FLOOR = 100_000
+# bound applies only to governed sizes. Single source: MAX_SKILL_CONTENT_CHARS.
+try:
+    from tools.skill_manager_tool import MAX_SKILL_CONTENT_CHARS as _HAND_PLACED_FLOOR
+except ImportError:  # pragma: no cover — cycle guard; ceiling is stable
+    _HAND_PLACED_FLOOR = 100_000
 
 # Discovery cache: {tree signature: (signature, timestamp, rows)}. The signature is every catalog
 # directory's child-dir names (an install under an existing category such as ``mlops/training/``
@@ -1068,24 +1071,16 @@ def skill_view(
         # Compaction envelope (2026-11-06): every serve carries a ref the
         # receipt can name and a digest of the FULL source bytes; if_digest
         # answers statelessly (session dedup dies at every compression
-        # boundary — this survives). Model-path bodies bound at 8 KB with a
-        # heading-ref continuation; slash/preload callers keep full bodies.
+        # boundary — this survives). The BODY BUDGET lives one layer up in
+        # _skill_view_with_bump: this library call also feeds the skill-ledger
+        # plugin's section/`#full` server, which must see full text.
         digest = _digest16(rendered_content)
         if if_digest is not None and if_digest == digest:
             return _json({"status": "unchanged", "ref": skill_name, "digest": digest})
-        served_content, truncated = (
-            _bound_skill_body(rendered_content) if preprocess and len(rendered_content) <= _HAND_PLACED_FLOOR
-            else (rendered_content, False))
         result = {
             "success": True, "name": skill_name, "description": frontmatter.get("description", ""),
-            "tags": tags, "related_skills": related_skills, "content": served_content,
+            "tags": tags, "related_skills": related_skills, "content": rendered_content,
             "ref": skill_name, "digest": digest,
-            "truncated": truncated, "total_chars": len(rendered_content),
-            "continuation": (
-                "Body bounded at 8000 chars for the model path; re-request the section "
-                "you need with file_path='SKILL.md#<heading>' (heading titles from the "
-                "first-view card), or preprocess=False for the full body.")
-            if truncated else None,
             "path": rel_path, "skill_dir": str(skill_dir) if skill_dir else None,
             "linked_files": linked_files if linked_files else None,
             "usage_hint": "To view linked files, call skill_view(name, file_path) where file_path is e.g. 'references/api.md' or 'assets/config.yaml'" if linked_files else None,
@@ -1161,6 +1156,28 @@ def _skill_view_with_bump(args, **kw):
     dedup_task_id = None if is_background_review() else task_id
     result = skill_view(name, file_path=args.get("file_path"), task_id=task_id,
                         if_digest=args.get("if_digest") or None)
+    # Model-path body budget (compaction envelope): default-view SKILL.md bodies
+    # bound at 8 KB with a heading-ref continuation. Lives HERE — the model-facing
+    # handler — not in skill_view(), whose full text also feeds the skill-ledger
+    # plugin's section/`#full` server. Hand-placed giants above the governance
+    # ceiling still read in full (TestHandPlacedSkillsNoLimit).
+    with suppress(Exception):
+        parsed = json.loads(result)
+        if (isinstance(parsed, dict) and parsed.get("success")
+                and isinstance(parsed.get("content"), str)
+                and not args.get("file_path")
+                and len(parsed["content"]) <= _HAND_PLACED_FLOOR):
+            full_len = len(parsed["content"])
+            body, truncated = _bound_skill_body(parsed["content"])
+            if truncated:
+                parsed["content"] = body
+                parsed["truncated"] = True
+                parsed["total_chars"] = full_len
+                parsed["continuation"] = (
+                    "Body bounded at 8000 chars for the model path; re-request the section "
+                    "you need with file_path='SKILL.md#<heading>' (heading titles from the "
+                    "first-view card), or file_path='SKILL.md#full' for the whole file.")
+                result = json.dumps(parsed, ensure_ascii=False)
     with suppress(Exception):
         parsed = json.loads(result)
         if isinstance(parsed, dict) and parsed.get("success"):
