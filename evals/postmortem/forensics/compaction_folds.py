@@ -163,6 +163,67 @@ def recovery_tax(
     return {"totals": tot, "by_kind": by_kind}
 
 
+def exact_key(call: dict[str, Any]) -> str:
+    """Tool + canonical arguments — the identity of an action, not just of its target."""
+    fn = call.get("function") or {}
+    return str(fn.get("name") or "") + "|" + json.dumps(_args(call), sort_keys=True, default=str)[:400]
+
+
+def session_calls_exact(rows: list[dict[str, Any]]) -> list[tuple[int, str, str]]:
+    """``(row_index, tool, exact_key)`` for every tool call, in transcript order."""
+    out: list[tuple[int, str, str]] = []
+    for i, row in enumerate(rows):
+        if row.get("role") != "assistant":
+            continue
+        for call in _tool_calls(row):
+            tool = str((call.get("function") or {}).get("name") or "")
+            key = exact_key(call)
+            if tool and key.split("|", 1)[1]:
+                out.append((i, tool, key))
+    return out
+
+
+def repeat_tax(
+    calls: list[tuple[int, str, str]],
+    anchors: list[int],
+    *,
+    window: int = 12,
+    lookback: int = 250,
+) -> dict[str, Any]:
+    """Exact-argument repeats after a fold, against the same window at mid-cycle.
+
+    A repeat is an identical ``(tool, canonical args)`` call that already appeared in the
+    ``lookback`` before the window. The control sits at the midpoint between two folds, so
+    workload and transcript position are held roughly constant and only the boundary varies.
+    That is the mechanical signature of replay ("trace back and redo"), as opposed to a
+    legitimate fresh read of the same file.
+    """
+    post = {"windows": 0, "calls": 0, "repeats": 0}
+    control = {"windows": 0, "calls": 0, "repeats": 0}
+
+    def observe(center: int, bucket: dict[str, int], stop: int | None = None) -> None:
+        # A window never crosses the next fold: calls after it belong to another epoch.
+        before = {k for i, _, k in calls if center - lookback <= i < center}
+        after = [
+            c for c in calls
+            if c[0] > center and (stop is None or c[0] < stop)
+        ][:window]
+        if not after:
+            return
+        bucket["windows"] += 1
+        for _, _, key in after:
+            bucket["calls"] += 1
+            if key in before:
+                bucket["repeats"] += 1
+
+    for index, anchor in enumerate(anchors):
+        stop = anchors[index + 1] if index + 1 < len(anchors) else None
+        observe(anchor, post, stop)
+    for prev, cur in pairwise(anchors):
+        observe(prev + max(0, (cur - prev) // 2), control, cur)
+    return {"post": post, "control": control}
+
+
 def receipt_bytes(rows: list[dict[str, Any]], anchors: list[int]) -> list[int]:
     return [len(rows[i].get("content") or "") for i in anchors]
 
@@ -171,9 +232,11 @@ def analyze_session(
     rows: list[dict[str, Any]], *, window: int = 12, lookback: int = 250
 ) -> dict[str, Any]:
     calls = session_calls(rows)
+    exact = session_calls_exact(rows)
     anchors = fold_anchors(rows)
     gaps = cadence_gaps(calls, anchors)
     tax = recovery_tax(calls, anchors, window=window, lookback=lookback)
+    repeats = repeat_tax(exact, anchors, window=window, lookback=lookback)
     receipts = receipt_bytes(rows, anchors)
     median_gap = statistics.median(gaps) if gaps else 0
     median_receipt = statistics.median(receipts) if receipts else 0
@@ -187,6 +250,7 @@ def analyze_session(
         "receipt_tokens_median": int(median_receipt // 4),
         "receipt_annuity_tokens": int((median_receipt // 4) * median_gap),
         "recovery": tax,
+        "repeats": repeats,
     }
 
 
@@ -195,6 +259,8 @@ def _aggregate(per_session: dict[str, dict[str, Any]]) -> dict[str, Any]:
     gaps, receipts = [], []
     calls = reacq = 0
     by_kind: dict[str, dict[str, int]] = {}
+    rep = {"post": {"windows": 0, "calls": 0, "repeats": 0},
+           "control": {"windows": 0, "calls": 0, "repeats": 0}}
     for s in per_session.values():
         if s["folds"] >= 2:
             gaps.append(s["gap_calls_median"])
@@ -207,6 +273,9 @@ def _aggregate(per_session: dict[str, dict[str, Any]]) -> dict[str, Any]:
             agg = by_kind.setdefault(k, {"calls": 0, "reacquired": 0})
             agg["calls"] += v["calls"]
             agg["reacquired"] += v["reacquired"]
+        for bucket in ("post", "control"):
+            for field in ("windows", "calls", "repeats"):
+                rep[bucket][field] += s["repeats"][bucket][field]
     return {
         "sessions": len(per_session),
         "folds": folds,
@@ -218,6 +287,14 @@ def _aggregate(per_session: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "recovery_share": round(reacq / calls, 4) if calls else 0.0,
         "by_kind": {k: {**v, "share": round(v["reacquired"] / v["calls"], 4) if v["calls"] else 0.0}
                     for k, v in sorted(by_kind.items())},
+        "repeat_post": rep["post"],
+        "repeat_control": rep["control"],
+        "repeat_post_share": round(rep["post"]["repeats"] / rep["post"]["calls"], 4)
+        if rep["post"]["calls"] else 0.0,
+        "repeat_control_share": round(rep["control"]["repeats"] / rep["control"]["calls"], 4)
+        if rep["control"]["calls"] else 0.0,
+        "repeat_ratio": round(rep["post"]["repeats"] / rep["control"]["repeats"], 2)
+        if rep["control"]["repeats"] else 0.0,
     }
 
 
@@ -254,6 +331,9 @@ def main(argv=None) -> int:
         f"(~{int(agg['receipt_chars_median'] // 4)} tok)",
         f"- recovery tax: {agg['recovery_reacquired']}/{agg['recovery_calls']} "
         f"= {agg['recovery_share']:.1%} of the first {window} calls after a fold",
+        f"- replay: {agg['repeat_post']['repeats']}/{agg['repeat_post']['calls']} = "
+        f"{agg['repeat_post_share']:.1%} of post-fold calls repeat an exact pre-fold action "
+        f"(mid-cycle control {agg['repeat_control_share']:.1%}; {agg['repeat_ratio']:.1f}x)",
         "",
         "| kind | calls | re-acquired | share |",
         "|---|---|---|---|",

@@ -12,11 +12,14 @@ import json
 from evals.postmortem.forensics.compaction_folds import (
     analyze_session,
     cadence_gaps,
+    exact_key,
     fold_anchors,
     recap_carriers,
     recovery_tax,
+    repeat_tax,
     same_target,
     session_calls,
+    session_calls_exact,
     tool_target,
 )
 
@@ -124,3 +127,53 @@ def test_receipt_annuity_is_size_times_gap():
     assert s["receipt_chars_median"] == 6000
     assert s["receipt_tokens_median"] == 1500
     assert s["receipt_annuity_tokens"] == 3000
+
+
+# ── replay identity ──────────────────────────────────────────────────────────────────────────
+
+
+def test_exact_key_normalizes_argument_order():
+    a = {"function": {"name": "read_file", "arguments": json.dumps({"path": "a", "limit": 5})}}
+    b = {"function": {"name": "read_file", "arguments": json.dumps({"limit": 5, "path": "a"})}}
+    assert exact_key(a) == exact_key(b)
+    assert exact_key(a) != exact_key(
+        {"function": {"name": "read_file", "arguments": json.dumps({"path": "a", "limit": 6})}})
+
+
+def test_repeat_tax_counts_only_identical_actions():
+    rows = [
+        _call(0, "read_file", path="src/a.rs"),
+        _fold(1),
+        _call(2, "read_file", path="src/a.rs"),   # identical action -> replay
+        _call(3, "read_file", path="src/a.rs", limit=40),  # same target, different action
+    ]
+    r = repeat_tax(session_calls_exact(rows), fold_anchors(rows))
+    assert r["post"] == {"windows": 1, "calls": 2, "repeats": 1}
+    assert r["control"]["calls"] == 0  # one fold -> no mid-cycle control
+
+
+def test_repeat_tax_control_sits_mid_gap():
+    rows = [
+        _call(0, "terminal", command="ls"),
+        _fold(1),
+        _call(2, "terminal", command="pwd"),
+        _call(3, "terminal", command="ls"),   # mid-gap replay (control)
+        _fold(4),
+        _call(5, "terminal", command="ls"),   # post-fold replay
+    ]
+    r = repeat_tax(session_calls_exact(rows), fold_anchors(rows))
+    # post is clipped at the next fold: fold 1 sees rows 2-3 (row 3 repeats), fold 4 sees row 5
+    assert r["post"] == {"windows": 2, "calls": 3, "repeats": 2}
+    # control at row 2 is clipped at fold 4: only row 3, which repeats the pre-window "ls"
+    assert r["control"] == {"windows": 1, "calls": 1, "repeats": 1}
+
+
+def test_repeat_tax_respects_the_lookback():
+    rows = [
+        _call(0, "read_file", path="a.rs"),
+        _call(1, "read_file", path="z.rs"),
+        _fold(2),
+        _call(3, "read_file", path="a.rs"),
+    ]
+    r = repeat_tax(session_calls_exact(rows), fold_anchors(rows), lookback=1)
+    assert r["post"]["repeats"] == 0
