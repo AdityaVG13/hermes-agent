@@ -909,11 +909,12 @@ def build_execute_code_schema(enabled_sandbox_tools: set | None = None,
     # Session kernels are always on (kernel_mode retired in #96787): persistence is part of the tool's one
     # description, not a bolt-on paragraph behind a dead conditional.
     description = (
-        "Run Python that calls Hermes tools programmatically. Use when you "
-        "need 3+ tool calls with logic between them: filtering/reducing "
-        "large outputs before they enter context, branching, or loops "
-        "(N pages/files, retry on failure). Use normal tool calls for "
-        "single calls, results you must reason over in full, or anything needing user interaction.\n\n"
+        "Run Python that calls Hermes tools programmatically — the DEFAULT for any flow of "
+        "3+ tool steps or a dependent chain (read → decide → read): one cell finishes the "
+        "whole sequence in a single round trip, with loops, branching, and output "
+        "filtering/reduction before it enters context. Each discrete tool call pays a full "
+        "model round trip; inside a cell they run in-process (ms each). Use normal tool "
+        "calls for single calls, results you must reason over in full, or anything needing user interaction.\n\n"
         "Calls run in a persistent session kernel: variables, imports, and "
         "loaded data survive across execute_code calls, so build on earlier "
         "work instead of re-loading it. A timed-out or interrupted call loses that state.\n\n"

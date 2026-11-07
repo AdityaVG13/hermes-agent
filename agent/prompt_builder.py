@@ -415,7 +415,9 @@ PARALLEL_TOOL_CALL_GUIDANCE = (
     "read-only commands should be batched into the same assistant turn — the runtime executes independent "
     "calls concurrently, and batching avoids resending the whole conversation on every extra round-trip.\n"
     "Only serialize calls when a later call genuinely depends on an earlier call's result (e.g. you must "
-    "read a file before you can patch it). When in doubt and the calls are independent, batch them."
+    "read a file before you can patch it). Dependent chains and any flow of 3+ tool steps belong in ONE "
+    "execute_code cell (hermes_tools functions): the cell runs the whole sequence in-process — ms per "
+    "call — instead of paying a model round trip per step. When in doubt and the calls are independent, batch them."
 )
 
 # Execution-discipline guidance for models that abandon partial results, skip prerequisite lookups, answer

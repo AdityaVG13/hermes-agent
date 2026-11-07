@@ -966,3 +966,24 @@ class TestRpcTokenAuthorization(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBatchingDefaultFraming(unittest.TestCase):
+    """2026-11-07: execute_code is the named DEFAULT for 3+-step / dependent flows.
+
+    Evidence: 56% of assistant turns carry exactly ONE tool call (state.db,
+    132,743 single-call turns of ~206K); each pays a full model round-trip to
+    run an ms-scale handler. The framing lives in the tool description and the
+    parallel-call guidance — pin both so they cannot silently regress."""
+
+    def test_description_names_the_round_trip_default(self):
+        from tools.code_execution_tool import build_execute_code_schema
+        d = build_execute_code_schema()["description"]
+        self.assertIn("DEFAULT", d)
+        self.assertIn("3+ tool steps", d)
+        self.assertIn("round trip", d)
+
+    def test_parallel_guidance_points_chains_at_execute_code(self):
+        from agent.prompt_builder import PARALLEL_TOOL_CALL_GUIDANCE
+        self.assertIn("execute_code", PARALLEL_TOOL_CALL_GUIDANCE)
+        self.assertIn("dependent", PARALLEL_TOOL_CALL_GUIDANCE)
