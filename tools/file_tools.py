@@ -1386,7 +1386,8 @@ def _handle_read_file(args, **kw):
             offset = ref_offset
         if ref_limit is not None and limit == DEFAULT_READ_LIMIT:
             limit = ref_limit
-    return read_file_tool(path=clean, offset=offset, limit=limit, task_id=tid)
+    return read_file_tool(path=clean, offset=offset, limit=limit, task_id=tid,
+                          if_hash=str(args.get("if_hash") or ""))
 
 
 def _handle_write_file(args, **kw):

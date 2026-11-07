@@ -105,3 +105,42 @@ def test_hash_changes_with_content(tmp_path):
     _write(f, "alpha\ngamma\n")
     h2 = _read(f, task="t2")["content_hash"]
     assert h1 != h2
+
+
+class TestDispatcherForwardsIfHash:
+    """2026-11-07, live megabatch: _handle_read_file dropped if_hash — every
+    native and kernel-RPC claim was silently ignored (full content re-sent).
+    The library fn was tested; the dispatcher that serves traffic wasn't.
+    Same-task repeats are answered by session dedup (also 'unchanged', fires
+    first by design) — the handshake is the layer that serves FRESH tasks
+    (post-compaction, new session), so that is what these tests pin."""
+
+    def test_fresh_task_claim_gets_the_handshake_stub(self, tmp_path):
+        from tools.file_tools import _handle_read_file
+        p = tmp_path / "h.txt"
+        p.write_text("dispatch-me\n")
+        first = json.loads(read_file_tool(str(p), task_id="prime-task"))
+        h = first["content_hash"]
+        # different task: no dedup state → only the if_hash handshake can answer
+        second = json.loads(_handle_read_file({"path": str(p), "if_hash": h}, task_id="claim-task"))
+        assert second.get("status") == "unchanged", second
+        assert second.get("content_returned") is False
+        assert second.get("if_hash") == h, second  # dedup stubs don't echo this
+
+    def test_fresh_task_stale_claim_serves_content(self, tmp_path):
+        from tools.file_tools import _handle_read_file
+        p = tmp_path / "h2.txt"
+        p.write_text("other-region\n")
+        second = json.loads(_handle_read_file({"path": str(p), "if_hash": "0" * 16}, task_id="fresh-task"))
+        assert "content" in second
+        assert second.get("status") != "unchanged"
+
+    def test_same_task_repeat_may_answer_via_dedup(self, tmp_path):
+        from tools.file_tools import _handle_read_file
+        p = tmp_path / "h3.txt"
+        p.write_text("dedup-path\n")
+        first = json.loads(read_file_tool(str(p), task_id="same-task"))
+        h = first["content_hash"]
+        second = json.loads(_handle_read_file({"path": str(p), "if_hash": h}, task_id="same-task"))
+        # dedup fires first and is correct too: unchanged either way
+        assert second.get("status") == "unchanged", second
