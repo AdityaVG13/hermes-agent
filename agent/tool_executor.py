@@ -1079,36 +1079,49 @@ def _context_gauge_note(agent) -> str:
     return f"[context {n} tokens]" if n > 0 else ""
 
 
-def _single_call_streak(messages) -> int:
+def _row_role_and_calls(msg):
+    """Role + tool_calls from either shape the loop uses: dict rows (persisted,
+    replay) or assistant message objects (in-memory)."""
+    if isinstance(msg, dict):
+        return msg.get("role"), msg.get("tool_calls")
+    return getattr(msg, "role", None), getattr(msg, "tool_calls", None)
+
+
+def _single_call_streak(messages, tool_call_id: str | None = None) -> tuple[int, bool]:
     """Trailing run of assistant turns that each carry exactly one tool call.
 
-    A multi-call turn, a text-only assistant turn, or any non-assistant row ends
-    the run: the nudge below must fire only on an unbroken chain of single-call
-    turns, never because old history happens to contain some."""
+    Returns ``(streak, includes_current)`` — ``includes_current`` is True when
+    the newest counted row is the caller's own in-flight call (matched by
+    ``tool_call_id``). A multi-call turn, a text-only assistant turn, or any
+    non-assistant row ends the run. The caller uses ``includes_current`` to
+    avoid double-counting the in-flight turn on paths that append its row
+    before dispatch (turn_tool_round) versus after (approval segments)."""
     streak = 0
+    includes_current = False
     for msg in reversed(messages):
-        if not isinstance(msg, dict):
-            break
-        role = msg.get("role")
+        role, calls = _row_role_and_calls(msg)
         if role == "tool":
             continue  # result rows ride under their assistant turn — skip, don't break
         if role != "assistant":
             break  # user/system turn: the acting flow was interrupted
-        calls = msg.get("tool_calls")
         if calls is None:
             break  # text-only turn: the acting flow was interrupted
         if len(calls) == 1:
             streak += 1
+            if not includes_current:
+                call = calls[0]
+                cid = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+                includes_current = cid == tool_call_id
             continue
         break  # 2+ calls: batching already happened
-    return streak
+    return streak, includes_current
 
 
 _BATCHING_NUDGE_AT = 3
 
 
 def _batching_nudge_note(agent, messages, function_name: str, *, is_error: bool = False,
-                         blocked: bool = False) -> Optional[str]:
+                         blocked: bool = False, tool_call_id: str = "") -> Optional[str]:
     """One-shot structural hint when single-call turns stack up (2026-11-07).
 
     state.db on this install: 56% of assistant turns carry exactly one tool
@@ -1120,22 +1133,24 @@ def _batching_nudge_note(agent, messages, function_name: str, *, is_error: bool 
     IS execute_code. Rides the gauge placement rule: appended once outside any
     untrusted wrapper, never rewritten (byte-stable row).
 
-    The in-flight turn's assistant row is NOT in ``messages`` during commits
-    (the executor holds it beside the list — live misfire 2026-11-07: a 3-call
-    batch turn got the hint), so ``agent._current_tool_batch_size`` — set by
-    ``_execute_tool_calls`` — is authoritative when present: a batch of 2+
-    executing right now never nags, and a single in flight counts as the
-    streak's newest member. Without it (replay/recovery callers) the
-    transcript alone decides."""
+    Append timing differs by path: turn_tool_round appends the in-flight row
+    BEFORE dispatch (so the walker already counts it), approval-segmented
+    turns commit before their row lands. ``tool_call_id`` — the caller's own
+    call — decides: count it only when the walker's newest row is NOT this
+    call. ``agent._current_tool_batch_size`` (set by ``_execute_tool_calls``)
+    is the belt-and-braces guarantee that a batch of 2+ executing right now is
+    never nagged even on paths whose rows lag. Live lesson 2026-11-07: an
+    unconditional ``+1`` double-counted the in-flight turn and silenced the
+    nudge on every plain path (the walker saw 3, we fired at 2, and the
+    one eligible turn was execute_code-suppressed — zero fires all day)."""
     if is_error or blocked or function_name == "execute_code":
         return None
     batch_size = getattr(agent, "_current_tool_batch_size", None)
-    if batch_size is not None:
-        if batch_size >= 2:
-            return None  # a batch is executing right now — never nag it
-        streak = 1 + _single_call_streak(messages)
-    else:
-        streak = _single_call_streak(messages)
+    if batch_size is not None and batch_size >= 2:
+        return None  # a batch is executing right now — never nag it
+    streak, includes_current = _single_call_streak(messages, tool_call_id or None)
+    if tool_call_id and not includes_current:
+        streak += 1  # this commit's own single rides a row that hasn't landed yet
     if streak != _BATCHING_NUDGE_AT:
         return None
     return ("[batching hint] 3 consecutive single-call turns — each costs a full model round trip. "
@@ -1246,7 +1261,8 @@ def _commit_tool_result(
     gauge_note = _context_gauge_note(agent)
     if gauge_note:
         _append_gauge_to_tool_message(tool_message, gauge_note)
-    batching_note = _batching_nudge_note(agent, messages, function_name, is_error=is_error, blocked=blocked)
+    batching_note = _batching_nudge_note(agent, messages, function_name, is_error=is_error,
+                                         blocked=blocked, tool_call_id=tool_call_id)
     if batching_note:
         _append_gauge_to_tool_message(tool_message, batching_note)
     # Prepare presentation data before the append. The emitting completion callback
