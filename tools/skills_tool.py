@@ -1180,7 +1180,10 @@ def _skill_view_with_bump(args, **kw):
             result = json.dumps(parsed, ensure_ascii=False)
     with suppress(Exception):
         parsed = json.loads(result)
-        if isinstance(parsed, dict) and parsed.get("success"):
+        # An if_digest probe is a freshness QUESTION, not a re-read: the session
+        # dedup stub would answer "unchanged" even for a garbage digest and mask
+        # the mismatch forever (found live 2026-11-07). Probes go stateless-only.
+        if isinstance(parsed, dict) and parsed.get("success") and not args.get("if_digest"):
             if (stub := dedup_skill_view(dedup_task_id, name, args.get("file_path"), parsed, result)) is not None:
                 return stub
             if resolved := parsed.get("name") or name:  # qualified forms return the canonical name

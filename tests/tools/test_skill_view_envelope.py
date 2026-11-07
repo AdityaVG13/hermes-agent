@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tools.skills_tool import skill_view
+from tools.skills_tool import _skill_view_with_bump, skill_view
 
 SKILL_MD = "---\nname: test-skill\ndescription: test skill\n---\n\n# One\nhello\n"
 
@@ -65,6 +65,18 @@ class TestIfDigest:
         d = _load(skill_view("test-skill", if_digest="0" * 16))
         assert "content" in d
         assert d.get("status") != "unchanged"
+
+    def test_mismatched_probe_not_masked_by_session_dedup(self, fake_skills):
+        # Found live (2026-11-07 gateway probe): a garbage if_digest asked
+        # "changed since THIS?" and the session-dedup stub answered "unchanged"
+        # — masking the mismatch forever. A probe is a question, not a re-read:
+        # the handler-level dedup must never intercept an if_digest request.
+        first = _load(_skill_view_with_bump({"name": "test-skill"}, task_id="probe"))
+        assert first.get("success")
+        second = _load(_skill_view_with_bump(
+            {"name": "test-skill", "if_digest": "f" * 16}, task_id="probe"))
+        assert second.get("status") != "unchanged", second
+        assert "content" in second
 
     def test_file_serve_if_digest_match_stubs(self, fake_skills):
         first = _load(skill_view("test-skill", file_path="SKILL.md"))
