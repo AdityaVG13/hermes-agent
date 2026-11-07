@@ -64,16 +64,27 @@ VERIFY_SCHEMA = {
 
 def _handle_verify(args, **kw):
     root_arg = args.get("path")
+    root = None
     if root_arg:
         root = Path(root_arg).expanduser()
     else:
         # Default to the SESSION's cwd, not this process's — the gateway process
-        # sits somewhere unrelated to the workspace the model is working in.
-        cwd = None
+        # sits somewhere unrelated to the workspace the model is working in. Same
+        # precedence read_file uses for relative paths (file_tools_paths): recorded
+        # session cwd, registered task override, scoped TERMINAL_CWD, process cwd.
         with suppress(Exception):
-            from tools.terminal_tool import get_session_cwd
-            cwd = get_session_cwd(kw.get("task_id") or kw.get("session_id"))
-        root = Path(cwd).expanduser() if cwd else Path.cwd()
+            from agent.runtime_cwd import scope_terminal_cwd
+            from tools.terminal_tool import get_session_cwd, resolve_task_overrides
+            key = kw.get("task_id")
+            for candidate in (get_session_cwd(key),
+                              resolve_task_overrides(key).get("cwd"),
+                              scope_terminal_cwd()):
+                text = str(candidate or "").strip()
+                if text:
+                    root = Path(text).expanduser()
+                    break
+        if root is None:
+            root = Path.cwd()
     if not root.is_dir():
         return {"error": f"verify: project root not found: {root_arg}"}
     from agent.coding_context import detect_project_facts
