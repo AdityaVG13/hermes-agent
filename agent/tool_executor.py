@@ -1079,6 +1079,55 @@ def _context_gauge_note(agent) -> str:
     return f"[context {n} tokens]" if n > 0 else ""
 
 
+def _single_call_streak(messages) -> int:
+    """Trailing run of assistant turns that each carry exactly one tool call.
+
+    A multi-call turn, a text-only assistant turn, or any non-assistant row ends
+    the run: the nudge below must fire only on an unbroken chain of single-call
+    turns, never because old history happens to contain some."""
+    streak = 0
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            break
+        role = msg.get("role")
+        if role == "tool":
+            continue  # result rows ride under their assistant turn — skip, don't break
+        if role != "assistant":
+            break  # user/system turn: the acting flow was interrupted
+        calls = msg.get("tool_calls")
+        if calls is None:
+            break  # text-only turn: the acting flow was interrupted
+        if len(calls) == 1:
+            streak += 1
+            continue
+        break  # 2+ calls: batching already happened
+    return streak
+
+
+_BATCHING_NUDGE_AT = 3
+
+
+def _batching_nudge_note(messages, function_name: str, *, is_error: bool = False,
+                         blocked: bool = False) -> Optional[str]:
+    """One-shot structural hint when single-call turns stack up (2026-11-07).
+
+    state.db on this install: 56% of assistant turns carry exactly one tool
+    call — each pays a full model round trip for an ms-scale handler, while
+    execute_code carried 0.82% of tool results. Prompt framing is volitional;
+    this fires from the loop itself. Self-limiting: exactly at three (never at
+    four — a multi-call turn must reset the pattern first), silent on errors
+    and blocked results (the model is mid-recovery), and silent when the call
+    IS execute_code. Rides the gauge placement rule: appended once outside any
+    untrusted wrapper, never rewritten (byte-stable row)."""
+    if is_error or blocked or function_name == "execute_code":
+        return None
+    if _single_call_streak(messages) != _BATCHING_NUDGE_AT:
+        return None
+    return ("[batching hint] 3 consecutive single-call turns — each costs a full model round trip. "
+            "Independent next steps: emit them as parallel calls in ONE response. "
+            "Dependent chain: execute_code finishes the whole flow in-process (ms per call).")
+
+
 def _append_gauge_to_tool_message(tool_message: dict, note: str) -> None:
     """Append the gauge outside any untrusted-data wrapper (like plugin notes): a string
     content grows by one trailing line; a multimodal list gains a trailing text part."""
@@ -1182,6 +1231,9 @@ def _commit_tool_result(
     gauge_note = _context_gauge_note(agent)
     if gauge_note:
         _append_gauge_to_tool_message(tool_message, gauge_note)
+    batching_note = _batching_nudge_note(messages, function_name, is_error=is_error, blocked=blocked)
+    if batching_note:
+        _append_gauge_to_tool_message(tool_message, batching_note)
     # Prepare presentation data before the append. The emitting completion callback
     # stays below the durability fence; raw tool/model content remains unchanged.
     prepare_metadata = getattr(agent, "tool_result_metadata_callback", None)
