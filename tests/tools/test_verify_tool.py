@@ -110,12 +110,17 @@ class TestTimeoutKillsGroup:
         # A gate that spawns a background child and outlives the timeout: the
         # whole process GROUP must die, or orphaned test workers linger.
         (tmp_path / "Makefile").write_text(
-            "check:\n\t@python3 -c \"import subprocess,time; "
+            "check:\n\t@python3 -c \"print('gate-marker-line', flush=True); "
+            "import subprocess,time; "
             "p=subprocess.Popen(['sleep','30']); "
             "open('child.pid','w').write(str(p.pid)); time.sleep(60)\"\n"
         )
         result = _handle_verify({"path": str(tmp_path), "timeout": 3})
         assert result.get("timeout") is True
+        # The partial output survives the kill, bounded — the model must see
+        # where the gate hung, not an empty verdict.
+        assert "output_tail" in result and "gate-marker-line" in result["output_tail"]
+        assert len(result["output_tail"]) <= 6000
         import os
         pid = int((tmp_path / "child.pid").read_text().strip())
         try:

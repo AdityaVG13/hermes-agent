@@ -105,13 +105,20 @@ def _handle_verify(args, **kw):
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        out, err = "", ""  # first communicate() raised before assigning
         with suppress(ProcessLookupError, PermissionError):
             os.killpg(proc.pid, signal.SIGKILL)  # start_new_session: pgid == pid
-        out, err = proc.communicate()
+        # A grandchild that daemonized out of the group can still hold the pipe
+        # open — a second bounded wait keeps the verdict itself from hanging.
+        with suppress(subprocess.TimeoutExpired, OSError):
+            out, err = proc.communicate(timeout=5)
+        partial = ((out or "") + (("\n" + err) if err else ""))[-_OUTPUT_TAIL_CHARS:]
         return {
             "command": cmd, "passed": False, "timeout": True,
             "exit_code": proc.returncode,
             "duration_seconds": round(time.monotonic() - started, 2),
+            "output_tail": partial,
+            "truncated": True,
             "error": f"verify: gate exceeded {timeout:.0f}s and was killed; "
             "re-run with a larger timeout or use terminal.",
             "commands_discovered": commands,
