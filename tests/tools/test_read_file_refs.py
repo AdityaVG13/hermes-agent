@@ -58,6 +58,22 @@ class TestHandlerWiring:
         assert captured["offset"] == 12
         assert captured["limit"] == 29
 
+    def test_single_line_ref_sets_offset_only(self):
+        from tools import file_tools
+
+        captured = {}
+
+        def fake_read_file_tool(**kwargs):
+            captured.update(kwargs)
+            return {"output": "ok"}
+
+        with patch.object(file_tools, "read_file_tool", fake_read_file_tool):
+            file_tools._handle_read_file({"path": "src/a.py#L7"}, task_id="t")
+
+        assert captured["path"] == "src/a.py"
+        assert captured["offset"] == 7
+        assert captured["limit"] == file_tools.DEFAULT_READ_LIMIT
+
     def test_explicit_offset_wins_over_ref(self):
         from tools import file_tools
 
