@@ -8,8 +8,11 @@ No compaction logic lives here; the result is a bounded envelope (command,
 exit code, pass/fail, byte counts, tail + honest truncation).
 """
 
+import os
+import signal
 import subprocess
 import time
+from contextlib import suppress
 from pathlib import Path
 
 from tools.registry import registry
@@ -57,8 +60,17 @@ VERIFY_SCHEMA = {
 
 
 def _handle_verify(args, **kw):
-    root_arg = args.get("path") or "."
-    root = Path(root_arg).expanduser()
+    root_arg = args.get("path")
+    if root_arg:
+        root = Path(root_arg).expanduser()
+    else:
+        # Default to the SESSION's cwd, not this process's — the gateway process
+        # sits somewhere unrelated to the workspace the model is working in.
+        cwd = None
+        with suppress(Exception):
+            from tools.terminal_tool import get_session_cwd
+            cwd = get_session_cwd(kw.get("task_id") or kw.get("session_id"))
+        root = Path(cwd).expanduser() if cwd else Path.cwd()
     if not root.is_dir():
         return {"error": f"verify: project root not found: {root_arg}"}
     from agent.coding_context import detect_project_facts
@@ -85,13 +97,20 @@ def _handle_verify(args, **kw):
     except (TypeError, ValueError):
         timeout = _DEFAULT_TIMEOUT
     started = time.monotonic()
+    # Own process group: on timeout the whole tree dies (make spawns workers —
+    # killing only the shell would orphan them mid-test-run).
+    proc = subprocess.Popen(
+        cmd, shell=True, cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors="replace", start_new_session=True)
     try:
-        proc = subprocess.run(
-            cmd, shell=True, cwd=str(root), capture_output=True, text=True,
-            errors="replace", timeout=timeout, check=False)
+        out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        with suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)  # start_new_session: pgid == pid
+        out, err = proc.communicate()
         return {
             "command": cmd, "passed": False, "timeout": True,
+            "exit_code": proc.returncode,
             "duration_seconds": round(time.monotonic() - started, 2),
             "error": f"verify: gate exceeded {timeout:.0f}s and was killed; "
             "re-run with a larger timeout or use terminal.",
@@ -100,7 +119,7 @@ def _handle_verify(args, **kw):
     except OSError as exc:
         return {"error": f"verify: could not execute {cmd!r}: {exc}"}
     duration = round(time.monotonic() - started, 2)
-    out, err = proc.stdout or "", proc.stderr or ""
+    out, err = out or "", err or ""
     combined = out + ("\n" + err if err else "")
     return {
         "command": cmd,

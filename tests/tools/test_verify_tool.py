@@ -79,6 +79,53 @@ class TestRunsDiscoveredGate:
         assert "error" in result
 
 
+class TestSessionCwd:
+    def test_default_path_uses_session_cwd_not_process_cwd(self, tmp_path, monkeypatch):
+        # A gate lives in the SESSION's dir; the process cwd has no gate. If verify
+        # resolved the default against the process cwd it would refuse here.
+        gated = tmp_path / "gated"
+        gated.mkdir()
+        (gated / "Makefile").write_text("check:\n\t@echo session gate\n")
+        bare = tmp_path / "bare"
+        bare.mkdir()
+        monkeypatch.chdir(bare)
+        from tools.terminal_tool import get_session_cwd
+        monkeypatch.setattr("tools.terminal_tool.get_session_cwd", lambda k: str(gated))
+        result = _handle_verify({}, task_id="sess-1")
+        assert result.get("command") == "make check"
+        assert "session gate" in result.get("output_tail", "")
+
+    def test_falls_back_to_process_cwd_when_unrecorded(self, tmp_path, monkeypatch):
+        gated = tmp_path / "gated"
+        gated.mkdir()
+        (gated / "Makefile").write_text("check:\n\t@echo fallback gate\n")
+        monkeypatch.chdir(gated)
+        monkeypatch.setattr("tools.terminal_tool.get_session_cwd", lambda k: None)
+        result = _handle_verify({}, task_id="sess-2")
+        assert result.get("passed") is True
+
+
+class TestTimeoutKillsGroup:
+    def test_timeout_kills_grandchildren(self, tmp_path):
+        # A gate that spawns a background child and outlives the timeout: the
+        # whole process GROUP must die, or orphaned test workers linger.
+        (tmp_path / "Makefile").write_text(
+            "check:\n\t@python3 -c \"import subprocess,time; "
+            "p=subprocess.Popen(['sleep','30']); "
+            "open('child.pid','w').write(str(p.pid)); time.sleep(60)\"\n"
+        )
+        result = _handle_verify({"path": str(tmp_path), "timeout": 3})
+        assert result.get("timeout") is True
+        import os
+        pid = int((tmp_path / "child.pid").read_text().strip())
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except OSError:
+            alive = False
+        assert not alive, f"grandchild {pid} survived the gate timeout"
+
+
 class TestEnvelope:
     def test_output_is_bounded_with_honest_truncation(self, tmp_path):
         _make_project(tmp_path, """
