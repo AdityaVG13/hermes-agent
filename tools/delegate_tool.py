@@ -200,6 +200,34 @@ def _apply_child_compression_cap(child, delegation_cfg: dict) -> None:
         cc._apply_threshold_tokens_cap()
 
 
+def _child_capability_note(child_toolsets, child_disabled_toolsets) -> str:
+    """One paragraph naming the deferred-tool universe THIS child can actually reach.
+
+    Children inherit the parent's toolsets but their context carries only the goal and
+    background — nothing names the purpose-built tools behind the tool_search bridge
+    (AST search, find-and-read, connectors), so a child unaware of them burns its small
+    window on manual read+grep loops. The note derives from the child's REAL scope —
+    the same un-collapsed catalog its bridge dispatch checks (`scoped_deferrable_names`)
+    — so it never names a tool the child cannot call, and never blocks a spawn: any
+    failure reads as no note. Deterministic for a fixed scope (sorted, capped at 8)."""
+    try:
+        import model_tools
+        from tools import tool_search as _ts
+        defs = model_tools.get_tool_definitions(
+            enabled_toolsets=child_toolsets, disabled_toolsets=child_disabled_toolsets,
+            quiet_mode=True, skip_tool_search_assembly=True) or []
+        names = sorted(_ts.scoped_deferrable_names(defs))
+    except Exception:
+        return ""
+    if not names:
+        return ""
+    shown = names[:8]
+    more = f" (+{len(names) - len(shown)} more)" if len(names) > len(shown) else ""
+    return ("Deferred tools in this session (not in your visible toolset — tool_search loads their "
+            f"schemas, tool_call invokes them): {', '.join(shown)}{more}. Check this list before "
+            "building a manual workflow; a purpose-built tool may already exist.")
+
+
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -254,6 +282,11 @@ def _build_child_agent(
     # as auxiliary.review.
     delegation_cfg = _load_config()
     child_toolsets, child_disabled_toolsets = _resolve_child_toolsets(parent_agent, toolsets, effective_role)
+    # The child learns its deferred-tool universe from the same scope its bridge will
+    # check — awareness, not access (access was always inherited with the toolsets).
+    _cap_note = _child_capability_note(child_toolsets, child_disabled_toolsets)
+    if _cap_note:
+        context = f"{(context or '').rstrip()}\n\n{_cap_note}" if (context or "").strip() else _cap_note
     child_prompt = _build_child_system_prompt(
         goal, context, workspace_path=_resolve_workspace_hint(parent_agent), role=effective_role,
         max_spawn_depth=max_spawn, child_depth=child_depth,
