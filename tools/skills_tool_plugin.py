@@ -65,13 +65,36 @@ def _available_skill_files(skill_dir: Path) -> dict[str, list[str]]:
     return {k: groups[k] for k in (*_SUPPORT_DIRS, "other") if k in groups}
 
 
+def _digest16(text: str) -> str:
+    """Short stable digest of served skill bytes (compaction envelope, 2026-11-06).
+
+    Computed over the FULL source content, never over a bounded slice, so
+    ``if_digest`` compares source identity statelessly across sessions and
+    across every compression boundary."""
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8", "backslashreplace")).hexdigest()[:16]
+
+
+_SKILL_BODY_BUDGET = 8_000
+
+
+def _bound_skill_body(content: str) -> tuple[str, bool]:
+    """Bound a model-path skill body at the envelope budget."""
+    if len(content) <= _SKILL_BODY_BUDGET:
+        return content, False
+    return content[:_SKILL_BODY_BUDGET], True
+
+
 def _serve_skill_file(
     skill_root: Path, file_path: str, label: str, *, hint: str | None = None,
-    list_available: bool = False, read_error_prefix: bool = False, mark_read: bool = False) -> str:
+    list_available: bool = False, read_error_prefix: bool = False, mark_read: bool = False,
+    if_digest: str | None = None) -> str:
     """Serve one linked file from a skill directory as a skill_view JSON result. ``hint``
     decorates traversal/containment errors; ``list_available`` adds the available-files listing
     on not-found (local); ``read_error_prefix`` wraps non-decode read errors (plugin) instead
-    of propagating to the caller's handler."""
+    of propagating to the caller's handler. ``if_digest`` (compaction envelope) short-circuits
+    a byte-identical re-serve into an ``unchanged`` stub."""
     from tools.path_security import has_traversal_component, validate_within_dir
     extra = {"hint": hint} if hint else {}
     if has_traversal_component(file_path):
@@ -97,8 +120,13 @@ def _serve_skill_file(
         return _fail(f"Failed to read '{file_path}': {exc}")
     if mark_read:
         _mark_background_review_read(target)
+    ref = f"{label}/{file_path}"
+    digest = _digest16(content)
+    if if_digest is not None and if_digest == digest:
+        return _json({"status": "unchanged", "ref": ref, "digest": digest})
     return _json({
         "success": True, "name": label, "file": file_path, "content": content,
+        "ref": ref, "digest": digest,
         "file_type": target.suffix})
 
 

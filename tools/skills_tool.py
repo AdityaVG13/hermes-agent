@@ -25,13 +25,19 @@ from tools.skills_tool_setup import (
     SkillReadinessStatus, _build_setup_note, _capture_required_environment_variables,
     _get_required_environment_variables, _is_env_var_persisted, _is_remote_env_backend)
 from tools.skills_tool_plugin import (
-    MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH, _INJECTION_PATTERNS, _fail, _json,
-    _mark_background_review_read, _preprocess_skill, _read_skill_text, _safe_frontmatter,
-    _serve_plugin_skill, _serve_skill_file, _truncate_description)
+    MAX_DESCRIPTION_LENGTH, MAX_NAME_LENGTH, _INJECTION_PATTERNS, _bound_skill_body, _digest16,
+    _fail, _json, _mark_background_review_read, _preprocess_skill, _read_skill_text,
+    _safe_frontmatter, _serve_plugin_skill, _serve_skill_file, _truncate_description)
 from tools.skills_tool_dedup import dedup_skill_view, reset_skill_view_dedup
 from tools.skill_provenance import is_background_review
 
 logger = logging.getLogger(__name__)
+
+# Compaction envelope carve-out: content ABOVE the storage-governance ceiling is
+# hand-placed by the owner and reads in full by contract (see
+# test_skill_size_limits.py TestHandPlacedSkillsNoLimit); the model-path body
+# bound applies only to governed sizes.
+_HAND_PLACED_FLOOR = 100_000
 
 # Discovery cache: {tree signature: (signature, timestamp, rows)}. The signature is every catalog
 # directory's child-dir names (an install under an existing category such as ``mlops/training/``
@@ -945,7 +951,8 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
 
 @_shares_scan_signature
 def skill_view(
-    name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True) -> str:
+    name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True,
+    if_digest: str | None = None) -> str:
     """View a skill (SKILL.md) or a file within its directory, as JSON. ``name`` is a skill name
     or path ("axolotl", "03-fine-tuning/axolotl"); "<plugin>:<skill>" resolves plugin-provided
     skills. ``preprocess`` applies the configured SKILL.md template / inline shell rendering;
@@ -987,7 +994,8 @@ def skill_view(
         if file_path and skill_dir:
             return _serve_skill_file(
                 skill_dir, file_path, name, list_available=True, mark_read=True,
-                hint="Use a relative path within the skill directory")
+                hint="Use a relative path within the skill directory",
+                if_digest=if_digest)
         # Pinned-briefcase short-circuit: the SKILL.md body already rides the
         # system prompt (byte-stable, prefix-cached across sessions) — re-serving
         # it here would re-bill the exact bytes as fresh input (prompt-cache
@@ -997,6 +1005,10 @@ def skill_view(
             from agent.skill_briefcase import is_pinned
 
             if skill_md is not None and is_pinned(resolved_name):
+                if if_digest is not None:
+                    # The pinned body rides the system prompt byte-stably — any
+                    # if_digest probe answers unchanged without serving bytes.
+                    return _json({"status": "unchanged", "ref": resolved_name, "pinned": True})
                 try:
                     short_rel = str(skill_md.relative_to(active_skills_dir))
                 except ValueError:
@@ -1053,9 +1065,27 @@ def skill_view(
                     + "` and reload."
                 )
 
+        # Compaction envelope (2026-11-06): every serve carries a ref the
+        # receipt can name and a digest of the FULL source bytes; if_digest
+        # answers statelessly (session dedup dies at every compression
+        # boundary — this survives). Model-path bodies bound at 8 KB with a
+        # heading-ref continuation; slash/preload callers keep full bodies.
+        digest = _digest16(rendered_content)
+        if if_digest is not None and if_digest == digest:
+            return _json({"status": "unchanged", "ref": skill_name, "digest": digest})
+        served_content, truncated = (
+            _bound_skill_body(rendered_content) if preprocess and len(rendered_content) <= _HAND_PLACED_FLOOR
+            else (rendered_content, False))
         result = {
             "success": True, "name": skill_name, "description": frontmatter.get("description", ""),
-            "tags": tags, "related_skills": related_skills, "content": rendered_content,
+            "tags": tags, "related_skills": related_skills, "content": served_content,
+            "ref": skill_name, "digest": digest,
+            "truncated": truncated, "total_chars": len(rendered_content),
+            "continuation": (
+                "Body bounded at 8000 chars for the model path; re-request the section "
+                "you need with file_path='SKILL.md#<heading>' (heading titles from the "
+                "first-view card), or preprocess=False for the full body.")
+            if truncated else None,
             "path": rel_path, "skill_dir": str(skill_dir) if skill_dir else None,
             "linked_files": linked_files if linked_files else None,
             "usage_hint": "To view linked files, call skill_view(name, file_path) where file_path is e.g. 'references/api.md' or 'assets/config.yaml'" if linked_files else None,
@@ -1102,6 +1132,11 @@ SKILL_VIEW_SCHEMA = {
                 "type": "string",
                 "description": "OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', 'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.",
             },
+            "if_digest": {
+                "type": "string",
+                "description": "A digest from an earlier serve of this same skill content. When the current bytes still match, you get {\"status\":\"unchanged\",\"ref\":...} with no body re-sent.",
+                "default": "",
+            },
         },
         "required": ["name"],
     },
@@ -1124,7 +1159,8 @@ def _skill_view_with_bump(args, **kw):
     # possibly-pruned transcript copy (#95976). No dedup in the fork; None also keeps its views
     # out of the parent's bucket.
     dedup_task_id = None if is_background_review() else task_id
-    result = skill_view(name, file_path=args.get("file_path"), task_id=task_id)
+    result = skill_view(name, file_path=args.get("file_path"), task_id=task_id,
+                        if_digest=args.get("if_digest") or None)
     with suppress(Exception):
         parsed = json.loads(result)
         if isinstance(parsed, dict) and parsed.get("success"):
