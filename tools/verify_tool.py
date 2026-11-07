@@ -20,6 +20,9 @@ from tools.registry import registry
 _OUTPUT_TAIL_CHARS = 6_000
 _DEFAULT_TIMEOUT = 300.0
 _MAX_TIMEOUT = 600.0
+# Read once at import: tests monkeypatch this seam, and patching os.name itself
+# poisons pathlib (Path.is_dir() goes False) — never do that.
+_IS_POSIX = os.name == "posix"
 
 VERIFY_SCHEMA = {
     "name": "verify",
@@ -37,7 +40,7 @@ VERIFY_SCHEMA = {
         "properties": {
             "path": {
                 "type": "string",
-                "description": "Project root (default: current working directory)",
+                "description": "Project root (default: the session's working directory; falls back to this process's cwd when unrecorded)",
                 "default": ".",
             },
             "command_index": {
@@ -98,16 +101,22 @@ def _handle_verify(args, **kw):
         timeout = _DEFAULT_TIMEOUT
     started = time.monotonic()
     # Own process group: on timeout the whole tree dies (make spawns workers —
-    # killing only the shell would orphan them mid-test-run).
+    # killing only the shell would orphan them mid-test-run). POSIX only; the
+    # Windows gateway degrades to killing the shell itself.
+    posix = _IS_POSIX
     proc = subprocess.Popen(
         cmd, shell=True, cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, errors="replace", start_new_session=True)
+        text=True, errors="replace", start_new_session=posix)
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         out, err = "", ""  # first communicate() raised before assigning
-        with suppress(ProcessLookupError, PermissionError):
-            os.killpg(proc.pid, signal.SIGKILL)  # start_new_session: pgid == pid
+        if posix:
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)  # start_new_session: pgid == pid
+        else:
+            with suppress(OSError):
+                proc.kill()
         # A grandchild that daemonized out of the group can still hold the pipe
         # open — a second bounded wait keeps the verdict itself from hanging.
         with suppress(subprocess.TimeoutExpired, OSError):

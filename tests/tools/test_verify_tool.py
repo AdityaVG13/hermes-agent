@@ -131,6 +131,25 @@ class TestTimeoutKillsGroup:
         assert not alive, f"grandchild {pid} survived the gate timeout"
 
 
+class TestPortableTimeout:
+    def test_timeout_survives_non_posix_os(self, tmp_path, monkeypatch):
+        # The Windows gateway shares this code: os.killpg does not exist there.
+        # With os.name patched away from posix, the timeout path must still
+        # return a verdict (kill() fallback) instead of raising.
+        (tmp_path / "Makefile").write_text(
+            "check:\n\t@python3 -c \"import time; print('win-marker', flush=True); time.sleep(10)\"\n"
+        )
+        from tools import verify_tool as _vt
+        monkeypatch.setattr(_vt, "_IS_POSIX", False)
+        result = _handle_verify({"path": str(tmp_path), "timeout": 3})
+        # Degraded branch contract: a VERDICT always comes back (never a crash,
+        # never an unbounded hang). The partial tail is best-effort here — with
+        # no process group, a surviving grandchild can hold the pipe open and
+        # the bounded drain gives up empty.
+        assert result.get("timeout") is True
+        assert result.get("passed") is False
+
+
 class TestEnvelope:
     def test_output_is_bounded_with_honest_truncation(self, tmp_path):
         _make_project(tmp_path, """
