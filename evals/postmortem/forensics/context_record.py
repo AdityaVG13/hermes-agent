@@ -74,6 +74,18 @@ def _parse(text: str) -> dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
 
 
+def _carried_ref(line: str) -> str:
+    """`- path: read lines 3-9` -> `path#L3-9`; an edited line keeps the bare path."""
+    text = (line or "").strip()
+    if text.startswith("- "):
+        text = text.removeprefix("- ")
+    path, _, detail = text.partition(": ")
+    if "read lines " in detail:
+        span = detail.split("read lines ", 1)[1].split(";", 1)[0].strip()
+        return f"{path}#L{span}"
+    return path
+
+
 def _clip(text: str, limit: int) -> str:
     text = " ".join((text or "").split())
     if len(text) <= limit:
@@ -124,6 +136,20 @@ def last_goal(rows: list[dict[str, Any]], *, goal_chars: int = DEFAULT_GOAL_CHAR
         if text and not is_injected(text):
             return _clip(_strip_attachment(text), goal_chars)
     return "(none)"
+
+
+def ask_pair(rows: list[dict[str, Any]], *, goal_chars: int = DEFAULT_GOAL_CHARS) -> tuple[str, str]:
+    """(first real ask, last real ask) in the window — objective and latest instruction."""
+    asks: list[str] = []
+    for row in rows:
+        if row.get("role") != "user" or row.get("_compressed_summary"):
+            continue
+        text = (row.get("content") or "").strip()
+        if text and not is_injected(text):
+            asks.append(_clip(_strip_attachment(text), goal_chars))
+    if not asks:
+        return "(none)", ""
+    return asks[0], asks[-1]
 
 
 def _basename(path: str) -> str:
@@ -186,7 +212,8 @@ def _outcome(results: dict[str, dict[str, Any]]) -> str:
     return "ok"
 
 
-def _handle(call: dict[str, Any], results: dict[str, dict[str, Any]]) -> tuple[str, str] | None:
+def _handle(call: dict[str, Any], results: dict[str, dict[str, Any]],
+            cmd_chars: int = 80) -> tuple[str, str] | None:
     name = _name(call)
     args = _args(call)
     res = results.get(str(call.get("id") or ""), {})
@@ -220,7 +247,7 @@ def _handle(call: dict[str, Any], results: dict[str, dict[str, Any]]) -> tuple[s
         if spill:
             return ("a", f"artifact: {spill}")
         command = " ".join(str(args.get("command") or args.get("code") or "").split())
-        return ("c", command[:80]) if command else None
+        return ("c", command[:cmd_chars]) if command else None
     return None
 
 
@@ -288,11 +315,19 @@ def build_record(
     max_batches: int = DEFAULT_MAX_BATCHES,
     goal_chars: int = DEFAULT_GOAL_CHARS,
     max_tokens: int = DEFAULT_TOKENS,
+    carried_lines: list[str] | None = None,
+    carried_goal: str = "",
+    cmd_chars: int = 80,
 ) -> dict[str, Any]:
     """Build the record for the rows being folded. Deterministic for identical input."""
     batches_ = batches(rows)
     plan = _plan(rows)
-    goal = last_goal(rows, goal_chars=goal_chars)
+    first_ask, last_ask = ask_pair(rows, goal_chars=goal_chars)
+    carried = _clip(_strip_attachment(carried_goal), goal_chars) if carried_goal else ""
+    # GOAL is the standing objective: the carried one survives a pivot, else the window's first
+    # ask. The newest instruction is listed separately only when it is a different thing.
+    goal = carried or first_ask
+    latest_ask = last_ask if last_ask and last_ask[:80] != goal[:80] else ""
     now = batches_[-1] if batches_ else None
     done = batches_[:-1]
 
@@ -306,7 +341,7 @@ def build_record(
     sequence = 0
     for batch in batches_:
         for call in batch.get("calls") or []:
-            h = _handle(call, batch.get("results") or {})
+            h = _handle(call, batch.get("results") or {}, cmd_chars)
             if h:
                 kind, value = h
                 seen.setdefault(kind, {})[value] = sequence
@@ -316,6 +351,17 @@ def build_record(
         kind: [value for value, _ in sorted(hits.items(), key=lambda kv: kv[1])][-caps[kind]:]
         for kind, hits in seen.items()
     }
+    if carried_lines:
+        existing = {value.split("#L", 1)[0].split(" (hash", 1)[0] for value in handles.get("f", [])}
+        carried = []
+        for line in carried_lines:
+            ref = _carried_ref(line)
+            bare = ref.split("#L", 1)[0]
+            if not bare or bare in existing:
+                continue
+            existing.add(bare)
+            carried.append(ref)
+        handles["f"] = (carried + handles.get("f", []))[-caps["f"]:]
 
     results = sum(len(b.get("results") or {}) for b in batches_)
     chars = sum(len(str(b.get("text") or "")) for b in batches_)
@@ -334,14 +380,20 @@ def build_record(
 
     first = first_row if first_row is not None else 0
     last = last_row if last_row is not None else len(rows)
-    recovery = (
-        f"session_search(session={session_id or '?'}, around={first})"
-        f"  # rows {first}-{last}"
-    )
+    if first_row is not None:
+        recovery = (
+            f"session_search(session={session_id or '?'}, around={first})"
+            f"  # rows {first}-{last}"
+        )
+    else:
+        query = _clip(goal, 60).replace(chr(34), chr(39))
+        where = f"session={session_id}, " if session_id else ""
+        recovery = f"session_search({where}query={query!r})"
 
     rec: dict[str, Any] = {
         "version": 1,
         "goal": goal,
+        "latest_ask": latest_ask,
         "plan": plan,
         "done": records,
         "done_dropped": dropped,
@@ -367,6 +419,8 @@ def render_record(rec: dict[str, Any]) -> str:
         "",
         f"GOAL: {rec['goal']}",
     ]
+    if rec.get("latest_ask"):
+        lines.append(f"LATEST ASK: {rec['latest_ask']}")
     plan = rec.get("plan") or []
     if plan:
         lines.append("PLAN:")
@@ -394,9 +448,11 @@ def render_record(rec: dict[str, Any]) -> str:
         + [("c", v) for v in handles.get("c") or []]
         + [("a", v) for v in handles.get("a") or []]
     )
+    lines.append("WORKING SET:")
     if entries:
-        lines.append("WORKING SET:")
         lines.extend(f"  {kind}  {value}" for kind, value in entries)
+    else:
+        lines.append("  (none)")
     loss = rec.get("loss") or {}
     lines.append(
         f"LOSS: {loss.get('rows', 0)} rows, {loss.get('results', 0)} tool results, "
