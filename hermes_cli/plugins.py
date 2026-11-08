@@ -557,6 +557,52 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             logger.log(*verdict.log)
         return False
 
+    def load_cli_plugin_for_command(self, command: str) -> bool:
+        """Fast path for ``hermes <plugin-command> …``: load ONLY the owning plugin.
+
+        A plugin-provided CLI command invoked in a short-lived subprocess (e.g. the quota
+        widget's ``hermes quota status --cached`` poll) otherwise pays the full discovery
+        sweep — importing every enabled plugin module, ~600ms — just to attach one argparse
+        subcommand. This scans manifests (no plugin imports), and when exactly one enabled
+        plugin declares ``command`` under ``provides_commands``, loads that plugin through
+        the same gating and loader the sweep uses.
+
+        ``_discovered`` stays False: anything later needing the full registry still triggers
+        the sweep lazily, so the fast path only removes work, never registry state.
+
+        True = command's plugin loaded, caller may skip the sweep. False = not covered
+        (unknown command, ambiguous, gated out, already swept, worker context); the caller
+        falls back to :meth:`discover_and_load` unchanged. Never raises.
+        """
+        from agent.safe_worker_policy import safe_worker_enabled
+
+        if not command or safe_worker_enabled() or plugin_discovery_suppressed():
+            return False
+        if self._discovered:
+            return False  # a sweep already registered every plugin command there is
+        try:
+            with self._discovery_lock:
+                if self._discovered:
+                    return False
+                manifests = [*self._collect_directory_manifests(), *self._scan_entry_points()]
+                owners = [
+                    m for m in resolve_manifest_winners(manifests).values()
+                    if command in (getattr(m, "provides_commands", None) or [])
+                ]
+                if len(owners) != 1:
+                    return False
+                manifest = owners[0]
+                if not self._gate_manifest(manifest, _get_disabled_plugins(), _get_enabled_plugins()):
+                    return False
+                self._warn_python_dependencies(manifest)
+                self._validate_plugin_config_schema(manifest)
+                with _plugin_home_scope(self.home_path):
+                    self._load_plugin(manifest)
+            return True
+        except Exception:
+            logger.debug("CLI fast path for %r failed; full discovery will run", command, exc_info=True)
+            return False
+
     def register_approval_transport(self, name: str, present_fn: Callable, *, plugin_id: str) -> None:
         """Manager-level registration (public API kept for out-of-tree plugins); the PluginContext
         method is the tracked path plugins normally use. Same validation, no unload tracking."""

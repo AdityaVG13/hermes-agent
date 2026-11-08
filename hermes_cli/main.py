@@ -3167,6 +3167,18 @@ def _register_plugin_cli_commands(subparsers) -> None:
             _attach_plugin_cli_command(subparsers, cmd_info)
             seen_plugin_commands.add(cmd_info["name"])
 
+        # Fast path: a command declared by exactly one enabled plugin's
+        # ``provides_commands`` loads only that plugin — a spawned
+        # ``hermes quota status --cached`` poll skips the ~600ms full sweep.
+        # Every other case falls through to the sweep below unchanged.
+        target = _first_positional_argv()
+        if target and target not in seen_plugin_commands:
+            if get_plugin_manager().load_cli_plugin_for_command(target):
+                for cmd_info in get_plugin_manager()._cli_commands.values():
+                    if cmd_info["name"] not in seen_plugin_commands:
+                        _attach_plugin_cli_command(subparsers, cmd_info)
+                return
+
         discover_plugins()
         # The invoked platform may still be a deferred entry; import it so its
         # register_cli_command side effect runs before we read _cli_commands.
