@@ -190,6 +190,20 @@ _ASK_FRAME = re.compile(
     r"i'd like|i would like|you need to|you should)\b",
     re.IGNORECASE,
 )
+# Leading discourse markers carry no instruction; strip them before testing the first word,
+# so "yeah do it, and…" is read as the instruction it is while "what do you think?" is not.
+_LEAD = re.compile(
+    r"^(?:(?:yeah|yep|ok|okay|yes|so|and|well|now|also|but|then|alright|right)[,\s]+)*",
+    re.IGNORECASE,
+)
+_LEADING = re.compile(
+    r"^(?:please\s+)?(do|make|check|fix|build|run|add|remove|find|investigate|write|update|"
+    r"review|implement|figure|help|create|delete|move|rename|verify|test|debug|look|search|"
+    r"read|change|refactor|design|explain|show|tell|give|use|start|stop|set|install|publish|"
+    r"ship|rebuild|rewrite|audit|clean|simplify|split|trace|measure|compare|research|release|"
+    r"port|eval|keep)\b",
+    re.IGNORECASE,
+)
 
 
 def goal_shaped(text: str) -> bool:
@@ -197,11 +211,12 @@ def goal_shaped(text: str) -> bool:
     flat = " ".join((text or "").split()).strip().rstrip(".!,")
     if not flat or flat.lower() in _ACKS:
         return False
-    if len(re.findall(r"[A-Za-z][A-Za-z'-]+", flat)) < 3:
+    body = _LEAD.sub("", flat)
+    if _LEADING.search(body):
+        return True
+    if len(re.findall(r"[A-Za-z][A-Za-z'-]+", body)) < 3:
         return False
-    if flat.endswith("?") and not _ASK_FRAME.search(flat):
-        return False
-    return bool(_IMPERATIVE.search(flat) or _ASK_FRAME.search(flat))
+    return bool(_IMPERATIVE.search(body) or _ASK_FRAME.search(body))
 
 
 def _strip_attachment(text: str) -> str:
