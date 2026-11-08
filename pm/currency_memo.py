@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import sys
 from pathlib import Path
 
-MEMO_VERSION = 2
+MEMO_VERSION = 3
 MEMO_NAME = "currency-memo.json"
 DISABLE_ENV = "HERMES_PM_CURRENCY_MEMO"
 
@@ -65,11 +67,14 @@ def _fact(path: Path):
 def _git_facts(root: Path) -> dict:
     """The checkout's git identity as pure file facts.
 
-    The running Hermes version comes from git on source installs and gates
-    member fitness (``hermes_fit_error``), so a checkout, pull, or retag that
-    leaves every walked input untouched must still invalidate the memo. HEAD's
-    own bytes cover detached checkouts; the ref it names, packed-refs, and the
-    refs/ tree cover branch moves and retags. Pure stdlib, no subprocess.
+    The running Hermes version comes from the install stamp or git on source
+    installs and gates member fitness (``hermes_fit_error``), so a checkout,
+    pull, or retag that leaves every walked input untouched must still
+    invalidate the memo. HEAD's own bytes cover detached checkouts; the ref it
+    names, packed-refs, shallow, and the refs/ tree cover branch moves, retags
+    and history-depth flips. A worktree's own HEAD lives in its admin dir while
+    refs live beside the common dir, so both are recorded. Pure stdlib, no
+    subprocess; undecodable bytes degrade to a never-equal error marker.
     """
     try:
         dot = root / ".git"
@@ -81,19 +86,22 @@ def _git_facts(root: Path) -> dict:
             gitdir = gitdir if gitdir.is_absolute() else root / gitdir
         else:
             gitdir = dot
+        admin = gitdir
         common = gitdir / "commondir"
         if common.is_file():  # worktrees keep refs beside the main gitdir
             base = Path(common.read_text(encoding="utf-8").strip())
             gitdir = base if base.is_absolute() else gitdir / base
-        head_path = gitdir / "HEAD"
+        head_path = admin / "HEAD"  # the checkout's own position, not the main's
         head_text = head_path.read_text(encoding="utf-8").strip() if head_path.is_file() else None
         ref_fact = None
         if head_text and head_text.startswith("ref: "):
             ref_fact = _fact(gitdir / head_text[5:].strip())
         return {"git": {"head": _fact(head_path), "text": head_text, "ref": ref_fact,
+                        "linked_head": _fact(gitdir / "HEAD") if admin != gitdir else None,
                         "packed": _fact(gitdir / "packed-refs"),
+                        "shallow": _fact(gitdir / "shallow"),
                         "refs": _walk(gitdir / "refs")}}
-    except OSError:
+    except (OSError, ValueError):
         return {"git": {"error": True}}
 
 
@@ -107,7 +115,19 @@ def _walk(root: Path) -> dict:
         # must not slip past just because it holds no hashed files.
         files[rel + "/"] = list(dirs)
         for name in names:
-            files[os.path.join(rel, name)] = _fact(Path(directory) / name)
+            path = Path(directory) / name
+            fact = _fact(path)
+            # The member stamp hashes a symlink's spelling (os.readlink), so a
+            # respelled link to an identically-stat'd target — or a retarget
+            # while broken, whose stat is None on both sides — must move the
+            # fact. Broken links record the spelling alone.
+            if os.path.islink(path):
+                try:
+                    spelling: object = os.readlink(path)
+                except OSError:
+                    spelling = None
+                fact = [*(fact if fact is not None else []), spelling]
+            files[os.path.join(rel, name)] = fact
     return files
 
 
@@ -177,7 +197,12 @@ def signature(project_root: Path, *, facts_paths, member_sources: dict, homes,
     root = Path(project_root)
     declined = declined_extras_path(root)
     lockfile = paths.lockfile_path()
+    from pm.paths import install_stamp_path
+
+    repo = paths.repo_root()
     return {
+        "machine": [sys.platform, platform.machine()],
+        "hermes": {"stamp": _fact(install_stamp_path(repo)), "git": _git_facts(repo)},
         "pm": _tree(Path(__file__).resolve().parent),
         "repo": {name: _fact(root / name) for name in _REPO_INPUTS},
         "semantics": {name: _fact(paths.repo_root() / name) for name in _SEMANTIC_INPUTS},
@@ -245,7 +270,18 @@ def read(project_root: Path, *, extras, plugins_encoded):
 def _unchanged(root: Path, sig: dict) -> bool:
     from pm import paths
     from pm.environments import dependency_home_root
+    from pm.paths import install_stamp_path
 
+    if [sys.platform, platform.machine()] != sig.get("machine"):
+        return False
+    hermes = sig.get("hermes")
+    if not isinstance(hermes, dict):
+        return False
+    repo = paths.repo_root()
+    if _fact(install_stamp_path(repo)) != hermes.get("stamp"):
+        return False
+    if _git_facts(repo) != hermes.get("git"):
+        return False
     if _tree(Path(__file__).resolve().parent) != sig.get("pm"):
         return False
     if {name: _fact(root / name) for name in _REPO_INPUTS} != sig.get("repo"):

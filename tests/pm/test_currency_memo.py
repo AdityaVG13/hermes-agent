@@ -219,3 +219,142 @@ class TestEveryChangeFallsBack:
         with pytest.raises(AssertionError):
             client.venv_is_current(extras=["e1"], plugins=Members([seeded_dir]),
                                    project_root=project)
+
+
+class TestHermesIdentityInputs:
+    """The running version (install stamp first, git second) gates member fitness.
+
+    ``running_hermes_version`` reads ``install-stamp.json`` when present and git
+    otherwise, so both are probe inputs for *every* root -- including project
+    roots, whose memo otherwise records only the project's own git facts.
+    """
+
+    @staticmethod
+    def _repo(monkeypatch, tmp_path, *, worktree=False):
+        repo = tmp_path / "hre"
+        repo.mkdir()
+        main = tmp_path / "main"
+        heads = main / ".git" / "refs" / "heads"
+        heads.mkdir(parents=True)
+        (main / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (heads / "main").write_text("0" * 40 + "\n", encoding="utf-8")
+        if worktree:
+            admin = main / ".git" / "worktrees" / "wt"
+            admin.mkdir(parents=True)
+            (admin / "commondir").write_text("../../../\n", encoding="utf-8")
+            (admin / "HEAD").write_text("f" * 40 + "\n", encoding="utf-8")
+            (repo / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        else:
+            (repo / ".git").mkdir()
+            (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+            (repo / ".git" / "refs" / "heads").mkdir(parents=True)
+            (repo / ".git" / "refs" / "heads" / "main").write_text("0" * 40 + "\n",
+                                                                   encoding="utf-8")
+        (repo / "hermes_constants.py").write_text("", encoding="utf-8")
+        (repo / "hermes_yaml.py").write_text("", encoding="utf-8")
+        (repo / "hermes_cli").mkdir()
+        (repo / "hermes_cli" / "plugins_manifest.py").write_text("", encoding="utf-8")
+        (repo / "hermes_cli" / "version_info.py").write_text("", encoding="utf-8")
+        from pm import paths
+
+        monkeypatch.setattr(paths, "repo_root", lambda: repo)
+        return repo
+
+    def test_install_stamp_edit(self, project, member, stubbed_probe, monkeypatch, tmp_path):
+        repo = self._repo(monkeypatch, tmp_path)
+        (repo / "install-stamp.json").write_text('{"v": 1}\n', encoding="utf-8")
+        _seed(project, member)
+        (repo / "install-stamp.json").write_text('{"v": 2}\n', encoding="utf-8")
+        _bump(repo / "install-stamp.json")
+        _armed(monkeypatch)
+        with pytest.raises(AssertionError):
+            client.venv_is_current(extras=["e1"], plugins=Members([member]),
+                                   project_root=project)
+
+    def test_hermes_retag_on_project_memo(self, project, member, stubbed_probe, monkeypatch,
+                                          tmp_path):
+        self._repo(monkeypatch, tmp_path)
+        _seed(project, member)
+        tags = tmp_path / "hre" / ".git" / "refs" / "tags"
+        tags.mkdir(parents=True)
+        (tags / "v9").write_text("0" * 40 + "\n", encoding="utf-8")
+        _armed(monkeypatch)
+        with pytest.raises(AssertionError):
+            client.venv_is_current(extras=["e1"], plugins=Members([member]),
+                                   project_root=project)
+
+    def test_shallow_flip(self, project, member, stubbed_probe, monkeypatch, tmp_path):
+        repo = self._repo(monkeypatch, tmp_path)
+        _seed(project, member)
+        (repo / ".git" / "shallow").write_text("0" * 40 + "\n", encoding="utf-8")
+        _armed(monkeypatch)
+        with pytest.raises(AssertionError):
+            client.venv_is_current(extras=["e1"], plugins=Members([member]),
+                                   project_root=project)
+
+    def test_worktree_checkout_moves_own_head(self, project, member, stubbed_probe, monkeypatch,
+                                              tmp_path):
+        self._repo(monkeypatch, tmp_path, worktree=True)
+        _seed(project, member)
+        admin = tmp_path / "main" / ".git" / "worktrees" / "wt"
+        (admin / "HEAD").write_text("e" * 40 + "\n", encoding="utf-8")
+        _armed(monkeypatch)
+        with pytest.raises(AssertionError):
+            client.venv_is_current(extras=["e1"], plugins=Members([member]),
+                                   project_root=project)
+
+    def test_poisoned_git_head_keeps_writer_alive(self, project, member, stubbed_probe,
+                                                  monkeypatch, tmp_path):
+        repo = self._repo(monkeypatch, tmp_path)
+        (repo / ".git" / "HEAD").write_bytes(b"\xff\xfe not utf-8")
+        from pm import currency_memo
+
+        currency_memo.write(project, extras=["e1"],
+                            plugins_encoded={"kind": "members", "paths": [str(member)]},
+                            facts_paths=[], member_sources={}, homes=[],
+                            environment=project / "venv", current=True)
+        assert _memo(project).is_file()
+
+    def test_machine_flip(self, seeded, project, monkeypatch):
+        memo = _memo(project)
+        data = json.loads(memo.read_text(encoding="utf-8"))
+        data.setdefault("sig", {})["machine"] = ["_plan9", "z80"]
+        memo.write_text(json.dumps(data), encoding="utf-8")
+        _armed(monkeypatch)
+        with pytest.raises(AssertionError):
+            client.venv_is_current(extras=["e1"], plugins=Members([seeded]),
+                                   project_root=project)
+
+
+class TestMemberSymlinkSpelling:
+    """``members_stamp`` hashes symlink *bytes* (``os.readlink``), not just the target.
+
+    A top-level link is already caught by the plugin-entry link lstat; a link
+    deeper inside a member is seen only by the walk, which must therefore
+    record the spelling itself.
+    """
+
+    def test_respelled_link_same_target(self, seeded, project, monkeypatch):
+        sub = seeded / "sub"
+        sub.mkdir()
+        (sub / "t.py").write_text("1\n", encoding="utf-8")
+        (sub / "l.py").symlink_to("t.py")
+        _seed(project, seeded)  # record the link as written
+        (sub / "l.py").unlink()
+        (sub / "l.py").symlink_to("./t.py")  # same target stats, different spelling
+        _armed(monkeypatch)
+        with pytest.raises(AssertionError):
+            client.venv_is_current(extras=["e1"], plugins=Members([seeded]),
+                                   project_root=project)
+
+    def test_broken_link_retarget(self, seeded, project, monkeypatch):
+        sub = seeded / "sub"
+        sub.mkdir()
+        (sub / "l.py").symlink_to("missing_a")  # broken: stat is None on both sides
+        _seed(project, seeded)
+        (sub / "l.py").unlink()
+        (sub / "l.py").symlink_to("missing_b")
+        _armed(monkeypatch)
+        with pytest.raises(AssertionError):
+            client.venv_is_current(extras=["e1"], plugins=Members([seeded]),
+                                   project_root=project)
