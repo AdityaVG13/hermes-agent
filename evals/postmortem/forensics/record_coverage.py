@@ -1,7 +1,9 @@
 """Coverage test for the Context Record: would the record have named what was replayed?
 
-For every real fold: build the record from the window the fold replaced, then take the
-calls the model actually replayed afterwards and ask whether the record named them.
+For every real fold: build the record from the calls the replay test uses as the pre-fold
+set (the last ``--lookback`` calls before the fold, not the fold's structural turn window),
+then take the calls the model actually replayed afterwards and ask whether the record named
+them. The approximation favours the record: a wider window can only add coverage.
 
   covered  — the record said this file/skill/command; the model had it and replayed anyway
   dropped  — the action was inside the window, but the record's rendering lost it
@@ -132,6 +134,9 @@ def main():
                 if len(examples[bucket]) < 12:
                     examples[bucket].append(f"{name}: {value[:90]}")
 
+    assert stats["covered"] + stats["dropped"] + stats["outside"] == stats["repeats"], (
+        "a replayed call was classified into no bucket"
+    )
     print(f"sessions: {sessions}  folds: {folds_seen}")
     total = max(1, stats["repeats"])
     print(f"replayed calls: {stats['repeats']}")
