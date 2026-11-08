@@ -34,6 +34,11 @@ INJECTED_PREFIXES = (
     "[BACKGROUND",
     "[TASK",
     "[NOTICE",
+    # Standing-goal workers: the host writes both carriers as ordinary user rows (display_kind
+    # ''), so the kind allow-list cannot see them. Measured 2026-11-08: 911 goal notices and 757
+    # preserved-task-list carriers, the two largest bracketed sources in state.db.
+    "[Continuing toward your standing goal]",
+    "[Your active task list was preserved across context compression]",
     "Files touched before this point",
 )
 DEFAULT_MAX_BATCHES = 40
@@ -309,6 +314,8 @@ def last_goal(rows: list[dict[str, Any]], *, goal_chars: int = DEFAULT_GOAL_CHAR
     for row in reversed(rows):
         if row.get("role") != "user" or row.get("_compressed_summary"):
             continue
+        if not is_human_row(row):
+            continue
         text = row.get("content")
         if not isinstance(text, str) or not text.strip():
             continue
@@ -323,6 +330,8 @@ def ask_pair(rows: list[dict[str, Any]], *, goal_chars: int = DEFAULT_GOAL_CHARS
     for row in rows:
         if row.get("role") != "user" or row.get("_compressed_summary"):
             continue
+        if not is_human_row(row):
+            continue
         text = row.get("content")
         if not isinstance(text, str) or not text.strip():
             continue
@@ -331,6 +340,35 @@ def ask_pair(rows: list[dict[str, Any]], *, goal_chars: int = DEFAULT_GOAL_CHARS
     if not asks:
         return "(none)", ""
     return asks[0], asks[-1]
+
+
+_STANDING_NOTICE = re.compile(r"^\s*\[Continuing toward your standing goal\]\s*(?:Goal:\s*)?",
+                              re.IGNORECASE)
+
+
+def standing_goal(rows: list[dict[str, Any]], *, goal_chars: int = DEFAULT_GOAL_CHARS) -> str:
+    """The objective a host "continuing toward your standing goal" notice declares.
+
+    That row is host-authored (``display_kind`` non-empty), so it is not the user's ask — but in a
+    standing-goal worker it is often the only carrier of the objective left in the window. Read
+    its Goal body as GOAL, never as LATEST ASK: measured on state.db, 1 of 35 sessions otherwise
+    renders the notice as the user's newest instruction.
+    """
+    for row in reversed(rows):
+        text = row.get("content")
+        if row.get("role") != "user" or row.get("_compressed_summary"):
+            continue
+        if is_human_row(row) or not isinstance(text, str):
+            continue
+        match = _STANDING_NOTICE.match(text)
+        if not match:
+            continue
+        body = text[match.end():].strip()
+        if body.lower().startswith("goal:"):
+            body = body.split(":", 1)[1].strip()
+        if body:
+            return _clip(body, goal_chars)
+    return ""
 
 
 _REF_SUFFIX = re.compile(r":[0-9]+(?:-[0-9]+)?$")
@@ -543,6 +581,8 @@ def build_record(
     # ask when it is objective-shaped. The newest instruction is listed separately only when it
     # is a different thing.
     goal = carried or (first_ask if goal_shaped(first_ask) else NO_GOAL)
+    if goal == NO_GOAL:
+        goal = standing_goal(rows, goal_chars=goal_chars) or NO_GOAL
     latest_ask = last_ask if last_ask and last_ask[:80] != goal[:80] else ""
     # A rule outlives the ask that stated it, so constraints are carried like GOAL instead of
     # being rebuilt from the window: the fold that follows usually contains no reminder.
