@@ -174,6 +174,42 @@ def is_human_row(row: dict[str, Any]) -> bool:
     return not (kind in NON_HUMAN_KINDS)
 
 
+# A standing rule is short and it addresses the work. "The cache is invalid without a
+# namespace" is prose that happens to contain a prohibition word; "Do not touch the cache" is
+# a rule. Measured over state.db: the substring gate admitted 11,363 sentences from human
+# rows, the shape gate admits 5,336, and the survivors read as rules.
+_RULE_STRONG = re.compile(
+    r"\b(?:do not|don't|dont|never|must not|should not|shouldn't|mustn't|no longer|not to)\b",
+    re.IGNORECASE,
+)
+_RULE_ADDRESSED = re.compile(r"\b(?:you|your|yours|we|us|let's|lets|please)\b", re.IGNORECASE)
+_RULE_BARE_NO = re.compile(r"^(?:no|not)\s+[a-z]{3,}\b", re.IGNORECASE)
+_RULE_LEADING = re.compile(
+    r"^(?:please\s+)?(?:avoid|stop|keep|ensure|remember|always|only|use|prefer|stick)\b",
+    re.IGNORECASE,
+)
+# A sentence ending in a bracket is the tail of an injected block, never a rule of its own.
+_RULE_TRAILING = re.compile(r"\]:?\s*$")
+_TRANSCRIPT = re.compile(r'(?m)^\s*(?:assistant|user|result|thinking|tool)\s*:|"\s*output\s*"\s*:')
+RULE_MAX_WORDS = 25
+
+
+def constraint_shaped(sentence: str) -> bool:
+    """True when a sentence reads as a rule the user set, not prose that merely mentions one."""
+    words = re.findall(r"[A-Za-z][A-Za-z'-]+", sentence)
+    if not words or len(words) > RULE_MAX_WORDS:
+        return False
+    if "|" in sentence or _RULE_TRAILING.search(sentence) or _TRANSCRIPT.search(sentence):
+        return False
+    if sentence.rstrip().endswith("?"):
+        return False  # a question asks; it does not set a rule
+    if _RULE_STRONG.search(sentence) or _RULE_LEADING.search(sentence):
+        return True
+    if _RULE_ADDRESSED.search(sentence) and CONSTRAINT_PATTERN.search(sentence):
+        return True
+    return bool(_RULE_BARE_NO.match(sentence) and len(words) <= 8)
+
+
 def extract_constraints(rows: list[dict[str, Any]], *, chars: int = CONSTRAINT_CHARS) -> list[str]:
     """Verbatim user statements in the window that still bind after the turn.
 
@@ -194,7 +230,7 @@ def extract_constraints(rows: list[dict[str, Any]], *, chars: int = CONSTRAINT_C
             continue
         for sentence in re.split(r"(?<=[.!?])\s+|\n+", body):
             sentence = " ".join(sentence.split())
-            if len(sentence) < 10 or not CONSTRAINT_PATTERN.search(sentence):
+            if len(sentence) < 10 or not constraint_shaped(sentence):
                 continue
             clipped = _clip(sentence, chars)
             if clipped and clipped not in out:
