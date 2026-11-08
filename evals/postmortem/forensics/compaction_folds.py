@@ -145,9 +145,12 @@ def recovery_tax(
     """Of the first ``window`` calls after each fold, how many re-buy a pre-fold target."""
     tot = {"windows": 0, "calls": 0, "reacquired": 0}
     by_kind: dict[str, dict[str, int]] = {}
-    for anchor in anchors:
+    for index, anchor in enumerate(anchors):
+        # A window never crosses the next fold: those calls belong to another epoch.
+        stop = anchors[index + 1] if index + 1 < len(anchors) else None
         before = [(k, t) for i, k, t in calls if anchor - lookback <= i < anchor and t]
-        after = [(k, t) for i, k, t in calls if i > anchor][:window]
+        after = [(k, t) for i, k, t in calls
+                 if i > anchor and (stop is None or i < stop)][:window]
         if not after:
             continue
         tot["windows"] += 1

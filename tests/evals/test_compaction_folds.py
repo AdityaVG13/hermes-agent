@@ -113,6 +113,19 @@ def test_recovery_tax_counts_only_pre_existing_targets():
     assert tax["by_kind"]["cmd"] == {"calls": 1, "reacquired": 0}
 
 
+def test_recovery_window_never_crosses_the_next_fold():
+    rows = [
+        _call(0, "read_file", path="src/a.rs"),
+        _fold(1),
+        _call(2, "read_file", path="src/a.rs"),   # fold 1's post window (re-buy)
+        _fold(3),
+        _call(4, "read_file", path="src/a.rs"),   # fold 3's post window
+    ]
+    tax = recovery_tax(session_calls(rows), fold_anchors(rows))
+    # fold 1 must stop at fold 3's boundary: 1 call each, not 2 then 1
+    assert tax["totals"] == {"windows": 2, "calls": 2, "reacquired": 2}
+
+
 def test_receipt_annuity_is_size_times_gap():
     rows = [
         _call(0, "read_file", path="a.rs"),
