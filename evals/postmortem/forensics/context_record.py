@@ -39,6 +39,8 @@ DEFAULT_MAX_BATCHES = 40
 DEFAULT_PLAN_ITEMS = 8
 DEFAULT_GOAL_CHARS = 400
 DEFAULT_TOKENS = 2000
+DEFAULT_CONSTRAINTS = 8
+CONSTRAINT_CHARS = 160
 
 
 def _tool_calls(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -126,6 +128,44 @@ def is_injected(text: str) -> bool:
         or CLIFF_HEADER in head[:200]
         or is_notice(head)
     )
+
+
+# A standing rule is a prohibition or a directive that outlives the turn it was said in.
+# The bare "no <noun>" form is deliberately included: "no ground", "no floor" and "no
+# reboots" are exactly the instructions that used to vanish, and they carry no verb.
+CONSTRAINT_PATTERN = re.compile(
+    r"\b(?:do not|don't|dont|never|must not|should not|shouldn't|avoid|"
+    r"without|no longer|not to|no [a-z]{3,})\b",
+    re.IGNORECASE,
+)
+
+
+def extract_constraints(rows: list[dict[str, Any]], *, chars: int = CONSTRAINT_CHARS) -> list[str]:
+    """Verbatim user statements in the window that still bind after the turn.
+
+    Deterministic: same rows, same list. ``ask_pair`` keeps only the first and last ask, so
+    a rule stated in the middle is unreachable without this pass.
+    """
+    out: list[str] = []
+    for row in rows:
+        if row.get("role") != "user" or row.get("_compressed_summary"):
+            continue
+        text = row.get("content")
+        if not isinstance(text, str) or not text.strip() or is_injected(text):
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", _strip_attachment(text)):
+            sentence = " ".join(sentence.split())
+            if len(sentence) < 10 or not CONSTRAINT_PATTERN.search(sentence):
+                continue
+            clipped = _clip(sentence, chars)
+            if clipped and clipped not in out:
+                out.append(clipped)
+    return out
+
+
+def record_constraints(rec: dict[str, Any]) -> list[str]:
+    """The CONSTRAINTS a built record carries, for the next fold to inherit."""
+    return [c for c in (rec.get("constraints") or []) if isinstance(c, str) and c]
 
 
 def _strip_attachment(text: str) -> str:
@@ -365,6 +405,8 @@ def build_record(
     max_tokens: int = DEFAULT_TOKENS,
     carried_lines: list[str] | None = None,
     carried_goal: str = "",
+    carried_constraints: list[str] | None = None,
+    constraint_limit: int = DEFAULT_CONSTRAINTS,
     cmd_chars: int = 80,
 ) -> dict[str, Any]:
     """Build the record for the rows being folded. Deterministic for identical input."""
@@ -378,6 +420,18 @@ def build_record(
     # ask. The newest instruction is listed separately only when it is a different thing.
     goal = carried or first_ask
     latest_ask = last_ask if last_ask and last_ask[:80] != goal[:80] else ""
+    # A rule outlives the ask that stated it, so constraints are carried like GOAL instead of
+    # being rebuilt from the window: the fold that follows usually contains no reminder.
+    merged: list[str] = []
+    seen_constraints: set[str] = set()
+    for item in [*(carried_constraints or []), *extract_constraints(rows)]:
+        key = " ".join(str(item).lower().split())
+        if not key or key in seen_constraints:
+            continue
+        seen_constraints.add(key)
+        merged.append(str(item))
+    constraints_dropped = max(0, len(merged) - constraint_limit)
+    constraints = merged[constraints_dropped:]
     now = batches_[-1] if batches_ else None
     done = batches_[:-1]
 
@@ -438,6 +492,8 @@ def build_record(
         "version": 1,
         "goal": goal,
         "latest_ask": latest_ask,
+        "constraints": constraints,
+        "constraints_dropped": constraints_dropped,
         "plan": plan,
         "plan_more": plan_more,
         "done": records,
@@ -472,6 +528,12 @@ def render_record(rec: dict[str, Any]) -> str:
     ]
     if rec.get("latest_ask"):
         lines.append(f"LATEST ASK: {rec['latest_ask']}")
+    constraints = rec.get("constraints") or []
+    if constraints:
+        lines.append("CONSTRAINTS (the user's standing rules, verbatim):")
+        if rec.get("constraints_dropped"):
+            lines.append(f"  … {rec['constraints_dropped']} earlier omitted")
+        lines.extend(f"  - {item}" for item in constraints)
     plan = rec.get("plan") or []
     if plan:
         lines.append("PLAN:")
