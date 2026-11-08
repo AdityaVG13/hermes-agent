@@ -148,6 +148,8 @@ def _pre_window(
     row, multi-row turns, tool results). Measuring "the last 250 calls" as "calls in the
     last 250 rows" silently shrinks the pre-fold set and undercounts every repeat.
     """
+    if lookback <= 0:
+        return []  # [-0:] would slice the whole list, not none of it
     return [c for c in calls if c[0] < center][-lookback:]
 
 

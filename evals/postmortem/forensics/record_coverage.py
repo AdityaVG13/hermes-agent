@@ -103,7 +103,8 @@ def main():
             if folds_seen >= args.max_folds:
                 break
             folds_seen += 1
-            pre = [c for c in calls if c[0] < anchor][-args.lookback:]
+            pre = ([c for c in calls if c[0] < anchor][-args.lookback:]
+                   if args.lookback > 0 else [])
             if not pre:
                 continue
             start = pre[0][0]

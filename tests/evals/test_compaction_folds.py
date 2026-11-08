@@ -113,6 +113,12 @@ def test_lookback_counts_calls_not_transcript_rows():
     assert tax["totals"]["reacquired"] == 1
 
 
+def test_zero_lookback_means_no_pre_fold_set():
+    rows = [_call(0, "read_file", path="a.rs"), _fold(1), _call(2, "read_file", path="a.rs")]
+    r = repeat_tax(session_calls_exact(rows), fold_anchors(rows), lookback=0)
+    assert r["post"]["repeats"] == 0
+
+
 # ── recovery tax ────────────────────────────────────────────────────────────────────────────
 
 
