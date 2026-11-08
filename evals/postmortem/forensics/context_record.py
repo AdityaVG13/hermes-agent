@@ -2,9 +2,9 @@
 
 Pure and deterministic over message rows: no model call, no runtime imports, no I/O, so
 the same transcript always renders the same bytes. `optchat/context_engine.py` calls it as
-the fold body; this file is byte-identical to the copy at
-`hermes-agent/evals/postmortem/forensics/context_record.py` (the measurement bed) — port
-changes to both.
+the fold body. A byte-identical copy lives at
+`optchat/record.py` (plugin) and `evals/postmortem/forensics/context_record.py`
+(Hermes checkout) — the two files must stay identical; port changes to both.
 
     rec = build_record(rows, session_id="local-…", first_row=1, last_row=880)
     text = render_record(rec)
