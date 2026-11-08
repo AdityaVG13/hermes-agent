@@ -190,11 +190,16 @@ def test_surviving_skill_names_counts_only_content():
     msgs = [
         {"role": "assistant", "content": "",
          "tool_calls": [call("c1", "alpha"), call("c2", "beta"), call("c3", "gamma"), call("c4", "delta"),
-                        call("c5", "epsilon")]},
+                        call("c5", "epsilon"), call("c6", "zeta"), call("c7", "eta")]},
         {"role": "tool", "tool_call_id": "c1", "content": "# alpha\n" + "b" * 2000},
         {"role": "tool", "tool_call_id": "c2", "content": "[skill_view] beta FAILED (unknown skill)"},
         {"role": "tool", "tool_call_id": "c3", "content": _lean_recovery_stub("skill_view", 5000, "sess")},
         {"role": "tool", "tool_call_id": "c4", "content": marker},
         {"role": "tool", "tool_call_id": "c5", "content": None},
+        # A live body may DOCUMENT the marker (skills that teach compaction); only a row that IS the
+        # marker is a pointer.
+        {"role": "tool", "tool_call_id": "c6",
+         "content": "# zeta\n\nHow eviction works: a row becomes [SKILL_PRUNED: ...] and must be reloaded.\n" + "z" * 1200},
+        {"role": "tool", "tool_call_id": "c7", "content": marker.replace("delta", "eta")},
     ]
-    assert surviving_skill_names(msgs) == {"alpha"}
+    assert surviving_skill_names(msgs) == {"alpha", "zeta"}

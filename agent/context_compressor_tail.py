@@ -75,6 +75,9 @@ def surviving_skill_names(messages: list[dict[str, Any]]) -> set[str]:
     pointer. A failed view, a demoted stub and a pruned marker all name a skill whose content is gone,
     so none of them counts. Callers hand this set to the repeat-read reset so a boundary can say which
     pointers survived instead of letting every consumer assume none did.
+
+    Names are the ones the tool call asked for; a pin recorded under a different (payload-resolved)
+    name would read as evicted. That direction is safe: the consumer re-reads content it still has.
     """
     from agent.context_compressor import (
         SKILL_PRUNED_MARKER_PREFIX, _content_text_for_contains, _skill_view_failed,
@@ -86,8 +89,12 @@ def surviving_skill_names(messages: list[dict[str, Any]]) -> set[str]:
         if msg.get("role") != "tool":
             continue
         text = _content_text_for_contains(msg.get("content"))
-        # No text is no evidence of content (an api_content-only row): never claim a survivor.
-        if not text or SKILL_PRUNED_MARKER_PREFIX in text or is_demoted_stub(text) or _skill_view_failed(msg.get("content")):
+        # No text is no evidence of content (an api_content-only row): never claim a survivor. A row
+        # that IS the marker is a pointer; a body that merely mentions it (a skill teaching
+        # compaction) is still content, so the marker test is anchored, not a substring search.
+        if not text or is_demoted_stub(text) or _skill_view_failed(msg.get("content")):
+            continue
+        if text.lstrip().startswith(SKILL_PRUNED_MARKER_PREFIX):
             continue
         name = call_id_to_skill.get(str(msg.get("tool_call_id") or ""), "")
         if name:
