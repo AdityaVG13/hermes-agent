@@ -17,6 +17,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+from evals.postmortem.forensics.compaction_folds import exact_key
 from evals.postmortem.forensics.context_record import _args, _name, _tool_calls, build_record
 
 COLS = "id, role, content, tool_calls, tool_call_id, tool_name, _compressed_summary"
@@ -32,12 +33,14 @@ def calls_of(rows):
             if not name:
                 continue
             args = _args(call)
-            key = name + "|" + json.dumps(args, sort_keys=True, default=str)[:400]
+            key = exact_key(call)
             out.append((index, name, args, key))
     return out
 
 
 def target(name, args):
+    """Finer-grained than ``compaction_folds.tool_target``: a search pattern is itself a
+    re-buyable target, and a 60-char command prefix is enough to test presence in the record."""
     if name in ("read_file", "patch", "write_file"):
         return ("file", str(args.get("path") or ""))
     if name == "skill_view":
