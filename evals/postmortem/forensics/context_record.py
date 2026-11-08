@@ -34,6 +34,7 @@ INJECTED_PREFIXES = (
     "[BACKGROUND",
     "[TASK",
     "[NOTICE",
+    "Files touched before this point",
 )
 DEFAULT_MAX_BATCHES = 40
 DEFAULT_PLAN_ITEMS = 8
@@ -140,6 +141,38 @@ CONSTRAINT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# The host marks its own injected user turns with ``display_kind``. The record used to drop
+# that column before extraction, so a delegation's report and a process notice were mined as
+# if the user had spoken them: measured on state.db (2026-11-06), 2,632 non-human user rows
+# and most of the channel's false positives came from there.
+NON_HUMAN_KINDS = frozenset({
+    "internal_notification",
+    "async_delegation_complete",
+    "process_complete",
+    "hidden",
+    "auto_continue",
+    "model_switch",
+})
+
+_HEADING = re.compile(r"(?m)^#{1,4} ")
+_BOLD_BULLET = re.compile(r"(?m)^\s*[-*]\s+\*\*")
+
+
+def is_document(text: str) -> bool:
+    """A pasted spec or a handed-off report is a document, not an utterance.
+
+    Two markdown headings or five bolded bullets in one user row is a document. Measured on
+    state.db: 440 such rows carried 49.7% of the channel's surviving sentences while being
+    agent-written handoffs and pasted lane specs.
+    """
+    return len(_HEADING.findall(text)) >= 2 or len(_BOLD_BULLET.findall(text)) >= 5
+
+
+def is_human_row(row: dict[str, Any]) -> bool:
+    """True when the host says this user turn came from the user, not from its own injectors."""
+    kind = row.get("display_kind") or ""
+    return not (kind in NON_HUMAN_KINDS)
+
 
 def extract_constraints(rows: list[dict[str, Any]], *, chars: int = CONSTRAINT_CHARS) -> list[str]:
     """Verbatim user statements in the window that still bind after the turn.
@@ -151,10 +184,15 @@ def extract_constraints(rows: list[dict[str, Any]], *, chars: int = CONSTRAINT_C
     for row in rows:
         if row.get("role") != "user" or row.get("_compressed_summary"):
             continue
+        if not is_human_row(row):
+            continue
         text = row.get("content")
         if not isinstance(text, str) or not text.strip() or is_injected(text):
             continue
-        for sentence in re.split(r"(?<=[.!?])\s+|\n+", _strip_attachment(text)):
+        body = _strip_attachment(text)
+        if is_document(body):
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", body):
             sentence = " ".join(sentence.split())
             if len(sentence) < 10 or not CONSTRAINT_PATTERN.search(sentence):
                 continue
