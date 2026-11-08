@@ -150,7 +150,13 @@ def is_orientation(proposal: dict) -> bool:
     if tool == "read_file":
         return str(args.get("path", "")).rsplit("/", 1)[-1] in ORIENT_BASENAMES
     if tool == "terminal":
-        return bool(ORIENT_CMD.search(" ".join(str(args.get("command", "")).split())))
+        text = str(args.get("command", ""))
+    elif tool == "execute_code":
+        text = str(args.get("code", ""))
+    else:
+        text = ""
+    if text:
+        return bool(ORIENT_CMD.search(" ".join(text.split())))
     if tool == "search_files":
         return str(args.get("pattern", "")) in ("AGENTS.md", "README.md", "CLAUDE.md")
     return False
@@ -243,6 +249,21 @@ def classify_loop(proposal: dict, fold: dict) -> str:
                               for i, k, v in fold["writes"])
             return "verification" if changed else "reestablish"
     return "orientation" if is_orientation(proposal) else "fresh"
+
+
+def classify_action(proposal: dict, fold: dict) -> str:
+    """Task work is a mutation, a delegation, or a new action; otherwise classify by target."""
+    tool, args = proposal.get("tool"), proposal.get("args") or {}
+    if tool in ("patch", "write_file", "skill_manage"):
+        return "task"
+    if tool == "delegate_task":
+        return "orientation" if args.get("action") == "list" else "task"
+    if tool == "execute_code":
+        return "orientation" if is_orientation(proposal) else "task"
+    if tool == "todo_list":
+        return "orientation" if args.get("action") in (None, "", "list", "read") else "task"
+    cls = classify_loop(proposal, fold)
+    return "task" if cls == "fresh" else cls
 
 
 def parse_one(text: str) -> dict | None:

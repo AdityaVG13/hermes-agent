@@ -68,6 +68,15 @@ def test_replay_prefers_recorded_results():
     assert "not executed" in L.replay(bank, {"tool": "patch", "args": {"path": "/r/a.py"}})
 
 
+def test_classify_action_wrapper_tools():
+    fold = {"last_target": {}, "writes": []}
+    assert L.classify_action({"tool": "patch", "args": {"path": "/a"}}, fold) == "task"
+    assert L.classify_action({"tool": "delegate_task", "args": {"action": "list"}}, fold) == "orientation"
+    assert L.classify_action({"tool": "execute_code", "args": {"code": "git status"}}, fold) == "orientation"
+    assert L.classify_action({"tool": "execute_code", "args": {"code": "patch('/a')"}}, fold) == "task"
+    assert L.classify_action({"tool": "terminal", "args": {"command": "pytest -q"}}, fold) == "task"
+
+
 def test_parse_one_accepts_a_single_object():
     assert L.parse_one('```json\n{"tool": "terminal", "args": {"command": "ls"}}\n```') == {
         "tool": "terminal", "args": {"command": "ls"}}
