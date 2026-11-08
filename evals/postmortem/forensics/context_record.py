@@ -144,8 +144,10 @@ CONSTRAINT_PATTERN = re.compile(
 # already refuses anything that is not the user's own voice. The record used to drop the column
 # before extraction, so a delegation's report and a process notice were mined as if the user had
 # spoken them: measured on state.db (2026-11-06), 2,615 non-human user rows plus 17 summary
-# carriers, and most of the channel's false positives came from there. This is an allow-list,
-# not a deny-list: a kind this build has never seen is host-authored until proven otherwise.
+# carriers. That is only 3% of the channel's sentences (612 of 20,525), but it is the worst kind
+# of false positive — another agent's "do not commit" quoted as the user's rule. This is an
+# allow-list, not a deny-list: a kind this build has never seen is host-authored until proven
+# otherwise.
 HUMAN_KINDS = frozenset({"", "steer"})
 
 _HEADING = re.compile(r"(?m)^#{1,4} ")
@@ -170,8 +172,8 @@ def is_human_row(row: dict[str, Any]) -> bool:
 
 # A standing rule is short and it addresses the work. "The cache is invalid without a
 # namespace" is prose that happens to contain a prohibition word; "Do not touch the cache" is
-# a rule. Measured over state.db: the substring gate admitted 11,363 sentences from human
-# rows, the shape gate admits 5,336, and the survivors read as rules.
+# a rule. Measured over state.db: the substring gate admitted 20,525 sentences, this one admits
+# 6,953 (a 66% cut), and the survivors read as rules.
 _RULE_STRONG = re.compile(
     r"\b(?:do not|don't|dont|never|must not|should not|shouldn't|mustn't|no longer|not to)\b",
     re.IGNORECASE,
