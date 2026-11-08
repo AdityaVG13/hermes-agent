@@ -47,7 +47,7 @@ def test_one_line_per_batch_and_now_is_the_last():
     text = render_record(rec)
     assert "DONE (completed; do not repeat):" in text
     assert "1. read the fold — read_file — ok" in text or "1. read the fold" in text
-    assert "LAST (done): run the lane" in text and "— ok" in text
+    assert "LAST FOLDED (done): run the lane" in text and "— ok" in text
     assert "evals/x.py#L10-39 (hash abc123)" in text
     assert "NEXT:" in text
 
@@ -70,6 +70,36 @@ def test_plan_and_next_come_from_the_todo_list():
     assert rec["next"].startswith("2. wire the record")
     assert "PLAN:" in rec["text"]
     assert "done step" not in rec["text"]
+
+
+def test_plan_is_capped_and_reports_the_remainder():
+    rows = [_row("user", "work the plan")]
+    todos = [{"id": str(i), "content": f"step {i}", "status": "pending"} for i in range(12)]
+    _batch(rows, "check todos", [_call("c1", "todo_list")], [{"todos": todos}])
+    rec = build_record(rows)
+    assert len(rec["plan"]) == 8
+    assert rec["plan_more"] == 4
+    assert "4 more open items" in rec["text"]
+
+
+def test_a_none_goal_does_not_poison_the_next_fold():
+    rows = [_row("user", "fix the fold")]
+    rec = build_record(rows, carried_goal="(none)")
+    assert rec["goal"] == "fix the fold"
+
+
+def test_an_edited_file_is_marked_edited_not_read():
+    rows = [_row("user", "edit it")]
+    _batch(rows, "patch", [_call("c1", "patch", path="/x/a.py")], [{"success": True}])
+    rec = build_record(rows)
+    assert "/x/a.py (edited)" in rec["text"]
+
+
+def test_non_string_content_does_not_crash_the_fold():
+    rows = [{"role": "user", "content": [{"type": "text", "text": "hi"}], "tool_calls": None,
+             "tool_call_id": "", "tool_name": "", "_compressed_summary": False}]
+    rec = build_record(rows)
+    assert rec["goal"] == "(none)"
 
 
 def test_deterministic_and_bounded():

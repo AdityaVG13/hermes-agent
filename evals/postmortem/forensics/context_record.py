@@ -1,7 +1,10 @@
 """Context Record: the one artifact a fold writes, an epoch seeds, recovery dereferences.
 
-Prototype over persisted message rows. Pure and deterministic: no model call, no imports
-from the runtime, no I/O. The engine will emit exactly this shape once it is approved.
+Pure and deterministic over message rows: no model call, no runtime imports, no I/O, so
+the same transcript always renders the same bytes. `optchat/context_engine.py` calls it as
+the fold body; this file is byte-identical to the copy at
+`hermes-agent/evals/postmortem/forensics/context_record.py` (the measurement bed) — port
+changes to both.
 
     rec = build_record(rows, session_id="local-…", first_row=1, last_row=880)
     text = render_record(rec)
@@ -32,6 +35,7 @@ INJECTED_PREFIXES = (
     "[NOTICE",
 )
 DEFAULT_MAX_BATCHES = 40
+DEFAULT_PLAN_ITEMS = 8
 DEFAULT_GOAL_CHARS = 400
 DEFAULT_TOKENS = 2000
 
@@ -74,6 +78,12 @@ def _parse(text: str) -> dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
 
 
+def bare_ref(value: str) -> str:
+    """The path a file handle names, without its span, hash, or edit marker."""
+    path = (value or "").split("#L", 1)[0].split(" (hash ", 1)[0]
+    return path.removesuffix(" (edited)")
+
+
 def _carried_ref(line: str) -> str:
     """`- path: read lines 3-9` -> `path#L3-9`; an edited line keeps the bare path."""
     text = (line or "").strip()
@@ -95,7 +105,7 @@ def _clip(text: str, limit: int) -> str:
 
 def is_notice(text: str) -> bool:
     """A bracketed all-caps preamble is a host notice (async batch, system note), not an ask."""
-    head = (text or "").lstrip()
+    head = text.lstrip() if isinstance(text, str) else ""
     if not head.startswith("["):
         return False
     end = head.find("]")
@@ -106,8 +116,8 @@ def is_notice(text: str) -> bool:
 
 def is_injected(text: str) -> bool:
     """A host-injected row is not a user ask: recaps, carried context, notices."""
-    head = (text or "").lstrip()
-    return (
+    head = text.lstrip() if isinstance(text, str) else ""
+    return bool(head) and (
         head.startswith(INJECTED_PREFIXES)
         or CLIFF_HEADER in head[:200]
         or is_notice(head)
@@ -124,16 +134,18 @@ def _strip_attachment(text: str) -> str:
         index += 1
     body = "\n".join(lines[index:]).strip()
     if body.startswith("```"):
-        body = body[3:].lstrip("`").lstrip()
-    return body or text
+        body = body.split("\n", 1)[1] if "\n" in body else body.lstrip("`")
+    return body.strip() or text
 
 
 def last_goal(rows: list[dict[str, Any]], *, goal_chars: int = DEFAULT_GOAL_CHARS) -> str:
     for row in reversed(rows):
         if row.get("role") != "user" or row.get("_compressed_summary"):
             continue
-        text = (row.get("content") or "").strip()
-        if text and not is_injected(text):
+        text = row.get("content")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if not is_injected(text):
             return _clip(_strip_attachment(text), goal_chars)
     return "(none)"
 
@@ -144,8 +156,10 @@ def ask_pair(rows: list[dict[str, Any]], *, goal_chars: int = DEFAULT_GOAL_CHARS
     for row in rows:
         if row.get("role") != "user" or row.get("_compressed_summary"):
             continue
-        text = (row.get("content") or "").strip()
-        if text and not is_injected(text):
+        text = row.get("content")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if not is_injected(text):
             asks.append(_clip(_strip_attachment(text), goal_chars))
     if not asks:
         return "(none)", ""
@@ -223,7 +237,7 @@ def _handle(call: dict[str, Any], results: dict[str, dict[str, Any]],
         if not path:
             return None
         if name != "read_file":
-            return ("f", path)
+            return ("f", f"{path} (edited)")
         start = int(args.get("offset") or 1)
         limit = int(args.get("limit") or 0)
         ref = path
@@ -285,7 +299,7 @@ def _done_line(index: int, batch: dict[str, Any], *, intent_chars: int = 110) ->
     return f"  {index}. {_clip(label, 150)} — {_outcome(batch.get('results') or {})}"
 
 
-def _plan(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _plan(rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]], int]:
     for row in reversed(rows):
         if row.get("role") != "tool" or row.get("tool_name") != "todo_list":
             continue
@@ -295,15 +309,16 @@ def _plan(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
                 t for t in items
                 if isinstance(t, dict) and str(t.get("status") or "") in ("pending", "in_progress")
             ]
+            shown = open_items[:DEFAULT_PLAN_ITEMS]
             return [
                 {
                     "id": str(t.get("id") or "?"),
                     "status": str(t.get("status") or "pending"),
                     "content": _clip(str(t.get("content") or ""), 120),
                 }
-                for t in open_items
-            ]
-    return []
+                for t in shown
+            ], len(open_items) - len(shown)
+    return [], 0
 
 
 def build_record(
@@ -321,9 +336,11 @@ def build_record(
 ) -> dict[str, Any]:
     """Build the record for the rows being folded. Deterministic for identical input."""
     batches_ = batches(rows)
-    plan = _plan(rows)
+    plan, plan_more = _plan(rows)
     first_ask, last_ask = ask_pair(rows, goal_chars=goal_chars)
-    carried = _clip(_strip_attachment(carried_goal), goal_chars) if carried_goal else ""
+    carried = ""
+    if carried_goal and carried_goal.strip() != "(none)":
+        carried = _clip(_strip_attachment(carried_goal), goal_chars)
     # GOAL is the standing objective: the carried one survives a pivot, else the window's first
     # ask. The newest instruction is listed separately only when it is a different thing.
     goal = carried or first_ask
@@ -352,11 +369,11 @@ def build_record(
         for kind, hits in seen.items()
     }
     if carried_lines:
-        existing = {value.split("#L", 1)[0].split(" (hash", 1)[0] for value in handles.get("f", [])}
+        existing = {bare_ref(value) for value in handles.get("f", [])}
         carried = []
         for line in carried_lines:
             ref = _carried_ref(line)
-            bare = ref.split("#L", 1)[0]
+            bare = bare_ref(ref)
             if not bare or bare in existing:
                 continue
             existing.add(bare)
@@ -395,6 +412,7 @@ def build_record(
         "goal": goal,
         "latest_ask": latest_ask,
         "plan": plan,
+        "plan_more": plan_more,
         "done": records,
         "done_dropped": dropped,
         "now": now,
@@ -425,6 +443,8 @@ def render_record(rec: dict[str, Any]) -> str:
     if plan:
         lines.append("PLAN:")
         lines.extend(f"  - [{item['status']}] {item['id']}. {item['content']}" for item in plan)
+        if rec.get("plan_more"):
+            lines.append(f"  … {rec['plan_more']} more open items")
     else:
         lines.append("PLAN: none — state ambiguous")
     lines.append("DONE (completed; do not repeat):")
@@ -438,7 +458,7 @@ def render_record(rec: dict[str, Any]) -> str:
         last = _clip(now.get("text") or "", 110) if _looks_like_prose(now.get("text") or "") else ""
         action = _targets(now.get("calls") or [])
         label = f"{last} — {action}" if last and action else (last or action)
-        lines.append(f"LAST (done): {_clip(label, 150)} — {_outcome(now.get('results') or {})}")
+        lines.append(f"LAST FOLDED (done): {_clip(label, 150)} — {_outcome(now.get('results') or {})}")
     lines.append(f"NEXT: {rec['next']}")
     handles = rec.get("handles") or {}
     entries = (
