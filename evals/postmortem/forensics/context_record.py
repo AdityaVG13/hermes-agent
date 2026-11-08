@@ -10,8 +10,8 @@ the fold body. A byte-identical copy lives at
     text = render_record(rec)
 
 Rows are dicts with ``role``, ``content``, ``tool_calls`` (list or JSON text),
-``tool_call_id`` and ``_compressed_summary``. Everything the record states is either
-verbatim (the ask, the todos) or mechanically derived (tool name, args, outcome, hash).
+``tool_call_id``, ``display_kind`` and ``_compressed_summary``. Everything the record states is
+either verbatim (the ask, the todos) or mechanically derived (tool name, args, outcome, hash).
 """
 from __future__ import annotations
 
@@ -132,9 +132,8 @@ def is_injected(text: str) -> bool:
     )
 
 
-# A standing rule is a prohibition or a directive that outlives the turn it was said in.
-# The bare "no <noun>" form is deliberately included: "no ground", "no floor" and "no
-# reboots" are exactly the instructions that used to vanish, and they carry no verb.
+# The weak half of a rule's shape: markers that only count when the sentence also addresses the
+# work (see ``constraint_shaped``). "without"/"avoid"/"only" alone are ordinary prose words.
 CONSTRAINT_PATTERN = re.compile(
     r"\b(?:do not|don't|dont|never|must not|should not|shouldn't|avoid|"
     r"without|no longer|not to|no [a-z]{3,})\b",
@@ -178,6 +177,8 @@ _RULE_STRONG = re.compile(
     re.IGNORECASE,
 )
 _RULE_ADDRESSED = re.compile(r"\b(?:you|your|yours|we|us|let's|lets|please)\b", re.IGNORECASE)
+# The bare "no <noun>" form is deliberately included: "no ground", "no floor" and "no reboots"
+# are exactly the instructions that used to vanish, and they carry no verb.
 _RULE_BARE_NO = re.compile(r"^(?:no|not)\s+[a-z]{3,}\b", re.IGNORECASE)
 _RULE_LEADING = re.compile(
     r"^(?:please\s+)?(?:avoid|stop|keep|ensure|remember|always|only|use|prefer|stick)\b",
