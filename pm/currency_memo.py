@@ -21,7 +21,7 @@ import json
 import os
 from pathlib import Path
 
-MEMO_VERSION = 1
+MEMO_VERSION = 2
 MEMO_NAME = "currency-memo.json"
 DISABLE_ENV = "HERMES_PM_CURRENCY_MEMO"
 
@@ -33,6 +33,12 @@ _EXCLUDED_DIRS = frozenset({".git", ".venv", "venv", "node_modules", "__pycache_
 
 # Files under the project root that feed the stamp (upstream's ACTIVATION_INPUTS).
 _REPO_INPUTS = ("uv.lock", "pyproject.toml")
+
+# Repo files outside pm/ whose code the probe's derivation runs: profile
+# liveness rules, the YAML reader, the manifest/requires_hermes gate, and the
+# git-derived running version. Facts only — a touched file means recompute.
+_SEMANTIC_INPUTS = ("hermes_constants.py", "hermes_yaml.py",
+                    "hermes_cli/plugins_manifest.py", "hermes_cli/version_info.py")
 
 _UNREADABLE = {"__unreadable__": True}
 
@@ -52,7 +58,43 @@ def _fact(path: Path):
         st = os.stat(path)
     except OSError:
         return None
-    return [st.st_mtime_ns, st.st_size, os.path.islink(path)]
+    # ctime covers chmod/ownership flips that move neither mtime nor size.
+    return [st.st_mtime_ns, st.st_size, os.path.islink(path), st.st_ctime_ns]
+
+
+def _git_facts(root: Path) -> dict:
+    """The checkout's git identity as pure file facts.
+
+    The running Hermes version comes from git on source installs and gates
+    member fitness (``hermes_fit_error``), so a checkout, pull, or retag that
+    leaves every walked input untouched must still invalidate the memo. HEAD's
+    own bytes cover detached checkouts; the ref it names, packed-refs, and the
+    refs/ tree cover branch moves and retags. Pure stdlib, no subprocess.
+    """
+    try:
+        dot = root / ".git"
+        if not dot.exists():
+            return {"git": None}
+        if dot.is_file():  # worktree: "gitdir: /path/to/main/.git"
+            pointer = dot.read_text(encoding="utf-8").strip()
+            gitdir = Path(pointer.split(":", 1)[1].strip())
+            gitdir = gitdir if gitdir.is_absolute() else root / gitdir
+        else:
+            gitdir = dot
+        common = gitdir / "commondir"
+        if common.is_file():  # worktrees keep refs beside the main gitdir
+            base = Path(common.read_text(encoding="utf-8").strip())
+            gitdir = base if base.is_absolute() else gitdir / base
+        head_path = gitdir / "HEAD"
+        head_text = head_path.read_text(encoding="utf-8").strip() if head_path.is_file() else None
+        ref_fact = None
+        if head_text and head_text.startswith("ref: "):
+            ref_fact = _fact(gitdir / head_text[5:].strip())
+        return {"git": {"head": _fact(head_path), "text": head_text, "ref": ref_fact,
+                        "packed": _fact(gitdir / "packed-refs"),
+                        "refs": _walk(gitdir / "refs")}}
+    except OSError:
+        return {"git": {"error": True}}
 
 
 def _walk(root: Path) -> dict:
@@ -99,8 +141,29 @@ def _entries(dir_path: Path) -> dict:
                 "dirs": sorted(n for n in top if (path / n).is_dir()),
                 "files": {n: _fact(path / n) for n in top if (path / n).is_file()},
             }
-        else:
-            out[name] = {"file": _fact(path)}
+            continue
+        entry: dict[str, object] = {"file": _fact(path)}
+        if path.is_symlink():
+            # Symlinked plugin entries are the fleet norm: record the link's own
+            # lstat (a retarget moves it even when the targets' stats collide)
+            # and the target's top level (an in-place manifest edit there moves
+            # neither the link nor the target dir's mtime).
+            try:
+                lst = os.lstat(path)
+                entry["link"] = [lst.st_mtime_ns, lst.st_size]
+            except OSError:
+                entry["link"] = None
+            try:
+                target = Path(os.readlink(path))
+                target = target if target.is_absolute() else path.parent / target
+                if target.is_dir():
+                    top = sorted(os.listdir(target))
+                    entry["dirs"] = sorted(n for n in top if (target / n).is_dir())
+                    entry["files"] = {n: _fact(target / n)
+                                      for n in top if (target / n).is_file()}
+            except OSError:
+                entry["target"] = "unreadable"
+        out[name] = entry
     return out
 
 
@@ -117,6 +180,8 @@ def signature(project_root: Path, *, facts_paths, member_sources: dict, homes,
     return {
         "pm": _tree(Path(__file__).resolve().parent),
         "repo": {name: _fact(root / name) for name in _REPO_INPUTS},
+        "semantics": {name: _fact(paths.repo_root() / name) for name in _SEMANTIC_INPUTS},
+        "git": _git_facts(root),
         "lockfile": {"path": str(lockfile), "fact": _fact(lockfile)},
         "facts": {str(path): _fact(Path(path)) for path in facts_paths},
         "declined": {"path": str(declined), "fact": _fact(declined)},
@@ -143,8 +208,15 @@ def write(project_root: Path, *, extras, plugins_encoded, facts_paths, member_so
     path = memo_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp-{os.getpid()}")
-    tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def read(project_root: Path, *, extras, plugins_encoded):
@@ -177,6 +249,10 @@ def _unchanged(root: Path, sig: dict) -> bool:
     if _tree(Path(__file__).resolve().parent) != sig.get("pm"):
         return False
     if {name: _fact(root / name) for name in _REPO_INPUTS} != sig.get("repo"):
+        return False
+    if {name: _fact(paths.repo_root() / name) for name in _SEMANTIC_INPUTS} != sig.get("semantics"):
+        return False
+    if _git_facts(root) != sig.get("git"):
         return False
     facts = sig.get("facts")
     if not isinstance(facts, dict) or {path: _fact(Path(path)) for path in facts} != facts:

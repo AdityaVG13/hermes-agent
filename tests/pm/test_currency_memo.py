@@ -49,6 +49,10 @@ def stubbed_probe(monkeypatch):
 @pytest.fixture
 def seeded(project, member, stubbed_probe):
     """A valid memo for (extras=['e1'], plugins=Members([member])), verdict True."""
+    return _seed(project, member)
+
+
+def _seed(project, member):
     facts = runtime_facts_path(project)
     facts.parent.mkdir(parents=True, exist_ok=True)
     facts.write_text(json.dumps(
@@ -156,4 +160,62 @@ class TestEveryChangeFallsBack:
         _armed(monkeypatch)
         with pytest.raises(AssertionError):
             client.venv_is_current(extras=["e2"], plugins=Members([seeded]),
+                                   project_root=project)
+
+    def test_git_state_appears(self, seeded, project, monkeypatch):
+        # The running version derives from git and gates member fitness; a
+        # checkout under the same walked files must still invalidate the memo.
+        git = project / ".git"
+        git.mkdir()
+        (git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        self._assert_probe_ran(seeded, project, monkeypatch)
+
+    def test_semantic_input_touch(self, seeded, project, monkeypatch):
+        from pm import paths
+
+        _bump(paths.repo_root() / "hermes_constants.py")
+        self._assert_probe_ran(seeded, project, monkeypatch)
+
+    def test_chmod_moves_ctime(self, seeded, project, monkeypatch):
+        (project / "uv.lock").chmod(0o600)
+        self._assert_probe_ran(seeded, project, monkeypatch)
+
+    def test_symlinked_plugin_retarget(self, project, member, stubbed_probe, tmp_path,
+                                       monkeypatch):
+        import os as _os
+
+        home = Path(_os.environ["HERMES_HOME"])
+        real_a = tmp_path / "plug_a"
+        real_a.mkdir()
+        (real_a / "plugin.toml").write_text("name: lnk\n", encoding="utf-8")
+        real_b = tmp_path / "plug_b"
+        real_b.mkdir()
+        (real_b / "plugin.toml").write_text("name: lnk\n", encoding="utf-8")
+        # Same directory times, so only the link itself proves the change.
+        st = real_a.stat()
+        _os.utime(real_b, ns=(st.st_atime_ns, st.st_mtime_ns))
+        (home / "plugins" / "lnk").symlink_to(real_a)
+        seeded_dir = _seed(project, member)
+        _armed(monkeypatch)
+        (home / "plugins" / "lnk").unlink()
+        (home / "plugins" / "lnk").symlink_to(real_b)
+        with pytest.raises(AssertionError):
+            client.venv_is_current(extras=["e1"], plugins=Members([seeded_dir]),
+                                   project_root=project)
+
+    def test_symlinked_plugin_top_level_edit(self, project, member, stubbed_probe, tmp_path,
+                                             monkeypatch):
+        import os as _os
+
+        home = Path(_os.environ["HERMES_HOME"])
+        real = tmp_path / "plug_real"
+        real.mkdir()
+        (real / "plugin.toml").write_text("name: lnk\n", encoding="utf-8")
+        (home / "plugins" / "lnk").symlink_to(real)
+        seeded_dir = _seed(project, member)
+        _armed(monkeypatch)
+        # In-place, same-size edit: moves the file's mtime, not the dir's.
+        (real / "plugin.toml").write_text("name: lnx\n", encoding="utf-8")
+        with pytest.raises(AssertionError):
+            client.venv_is_current(extras=["e1"], plugins=Members([seeded_dir]),
                                    project_root=project)
