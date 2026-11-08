@@ -47,8 +47,16 @@ def dedup_skill_view(task_id, name, file_path, payload: dict, result: str) -> st
     return None
 
 
-def reset_skill_view_dedup(task_id: str | None = None) -> None:
-    """Clear the dedup cache (all tasks when task_id is None); called on context compression."""
+def reset_skill_view_dedup(task_id: str | None = None, *,
+                           surviving_skills: set[str] | None = None) -> None:
+    """Clear the dedup cache (all tasks when task_id is None); called on context compression.
+
+    ``surviving_skills`` names the skills whose ``skill_view`` result (card, section or full body) the
+    committed list still carries (``None`` when the boundary path cannot know — e.g. a provider-side
+    checkpoint). It is a hint for in-process observers of this boundary (the skill-ledger pin digest
+    marks a pointer evicted rather than claiming its result is still present); the tracker itself still
+    clears wholesale, because a surviving *name* cannot prove that a section read of it survived.
+    """
     with _skill_view_tracker_lock:
         if task_id is None:
             _skill_view_tracker.clear()

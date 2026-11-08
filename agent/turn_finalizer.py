@@ -335,9 +335,11 @@ def _micro_compact_after_turn(agent, messages, final_response, logger, task_id) 
                 if _spliced:
                     # The splice summarized tool results away: a repeat read must serve them
                     # again, not an "unchanged" stub pointing at a body that is gone (#32106).
+                    from agent.context_compressor_tail import surviving_skill_names
                     from agent.conversation_compression import _reset_read_dedup_caches
 
-                    _reset_read_dedup_caches(task_id, session_id=agent.session_id or "", agent=agent)
+                    _reset_read_dedup_caches(task_id, session_id=agent.session_id or "", agent=agent,
+                                             surviving_skills=surviving_skill_names(messages))
             if _before != len(messages):
                 logger.info("Micro-compaction: %d -> %d messages", _before, len(messages))
     except Exception as _mc_err:

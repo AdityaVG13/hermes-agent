@@ -68,6 +68,33 @@ def skill_view_names_by_call_id(messages: list[dict[str, Any]]) -> dict[str, str
     return names
 
 
+def surviving_skill_names(messages: list[dict[str, Any]]) -> set[str]:
+    """Names whose ``skill_view`` result is still present in *messages*: the survivor half of a boundary.
+
+    The result may be a card, a section or a full body — what matters is that it is content, not a
+    pointer. A failed view, a demoted stub and a pruned marker all name a skill whose content is gone,
+    so none of them counts. Callers hand this set to the repeat-read reset so a boundary can say which
+    pointers survived instead of letting every consumer assume none did.
+    """
+    from agent.context_compressor import (
+        SKILL_PRUNED_MARKER_PREFIX, _content_text_for_contains, _skill_view_failed,
+    )
+
+    call_id_to_skill = skill_view_names_by_call_id(messages)
+    names: set[str] = set()
+    for msg in messages:
+        if msg.get("role") != "tool":
+            continue
+        text = _content_text_for_contains(msg.get("content"))
+        # No text is no evidence of content (an api_content-only row): never claim a survivor.
+        if not text or SKILL_PRUNED_MARKER_PREFIX in text or is_demoted_stub(text) or _skill_view_failed(msg.get("content")):
+            continue
+        name = call_id_to_skill.get(str(msg.get("tool_call_id") or ""), "")
+        if name:
+            names.add(name)
+    return names
+
+
 def demote_stale_tail_tools(
     messages: list[dict[str, Any]], tail_start: int, session_id: str,
 ) -> tuple[list[dict[str, Any]], int]:

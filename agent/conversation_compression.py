@@ -3344,11 +3344,17 @@ def _warn_summary_or_aux_fallback(agent: Any) -> None:
             )
 
 
-def _reset_read_dedup_caches(task_id: str, *, session_id: str = "", agent: Any = None) -> None:
+def _reset_read_dedup_caches(task_id: str, *, session_id: str = "", agent: Any = None,
+                             surviving_skills: set[str] | None = None) -> None:
     """Advance the file-read and skill_view repeat-read dedup to a fresh generation after a boundary.
     The mtime map is kept: the first read of each unchanged key returns full content compaction may have
     omitted; later reads return stubs, and stub-hit counters restart at the same boundary (#84857).
     The computer_use screenshot dedup is session-keyed and forgets its last frame for the same reason.
+
+    ``surviving_skills``: names whose ``skill_view`` result the committed list still carries, or ``None``
+    when this path cannot know (a provider-side checkpoint). Forwarded to the skill_view reset so an
+    in-process observer can mark its pointer evicted instead of implying the result is still there; the
+    tracker itself clears wholesale either way.
     """
     with contextlib.suppress(Exception):
         from tools.file_tools_read_tracking import reset_file_dedup
@@ -3359,7 +3365,7 @@ def _reset_read_dedup_caches(task_id: str, *, session_id: str = "", agent: Any =
             reset_screenshot_dedup(session_id)
     with contextlib.suppress(Exception):
         from tools.skills_tool import reset_skill_view_dedup
-        reset_skill_view_dedup(task_id)
+        reset_skill_view_dedup(task_id, surviving_skills=surviving_skills)
     guardrails = getattr(agent, "_tool_guardrails", None)
     if guardrails is not None:
         guardrails.reset_for_context_boundary()
@@ -3455,7 +3461,10 @@ def _finish_compaction_boundary(
             )
         else:
             compressor._verify_compaction_cleared_threshold = True
-    _reset_read_dedup_caches(task_id, session_id=agent.session_id or "", agent=agent)
+    from agent.context_compressor_tail import surviving_skill_names
+
+    _reset_read_dedup_caches(task_id, session_id=agent.session_id or "", agent=agent,
+                             surviving_skills=surviving_skill_names(compressed))
     return _compressed_est
 
 

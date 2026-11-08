@@ -110,12 +110,26 @@ def test_micro_compaction_splice_rearms_read_dedup(served, splice, monkeypatch):
             content="done", reasoning_content=None, reasoning=None, tool_calls=None), finish_reason="stop")],
         model="test/model", usage=None)
 
+    forwarded = []
+    from tools import skills_tool
+
+    real_reset = skills_tool.reset_skill_view_dedup
+
+    def spy(task_id=None, **kw):
+        forwarded.append(kw.get("surviving_skills"))
+        return real_reset(task_id)
+
+    monkeypatch.setattr(skills_tool, "reset_skill_view_dedup", spy)
+
     result = _run(agent, served, monkeypatch)
 
     assert any(m.get("content") == "[MICRO] loaded demo-skill" for m in result["messages"]) is splice
     # A splice took the skill body and may have taken the file body: both repeats serve content again.
     # A no-op pass removed nothing, so both stubs stay.
     assert _dedup_state() == ((False, False) if splice else (True, True))
+    # The boundary names the set of bodies it kept (empty here: the skill row left), so a consumer can
+    # tell "nothing survived" from "this path cannot know" (None — no reset ran at all on a no-op pass).
+    assert forwarded == ([set()] if splice else [])
 
 
 def test_native_checkpoint_rearms_read_dedup(served, monkeypatch):
@@ -144,3 +158,43 @@ def test_native_checkpoint_rearms_read_dedup(served, monkeypatch):
     re_view = [m for m in result["messages"] if m.get("role") == "tool" and m.get("tool_call_id") == "call_view"]
     assert re_view and "Do the demo steps." in re_view[-1]["content"]
     assert _dedup_state()[1] is False  # the file read served before the checkpoint is off the wire too
+
+
+def test_boundary_forwards_surviving_skill_names(monkeypatch):
+    """A boundary tells the skill_view reset which bodies the committed list still carries, so an
+    in-process observer can mark a pointer evicted instead of implying its body is still there.
+    ``None`` stays distinct from the empty set: "this path cannot know" vs "nothing survived"."""
+    from agent.conversation_compression import _reset_read_dedup_caches
+
+    seen = []
+
+    def spy(task_id=None, **kw):
+        seen.append((task_id, kw.get("surviving_skills")))
+
+    monkeypatch.setattr("tools.skills_tool.reset_skill_view_dedup", spy)
+    _reset_read_dedup_caches(TASK, surviving_skills={"demo-skill"})
+    _reset_read_dedup_caches(TASK)
+    assert seen == [(TASK, {"demo-skill"}), (TASK, None)]
+
+
+def test_surviving_skill_names_counts_only_content():
+    """A pointer is not content: a failed view, a demoted stub and a prune marker all name a skill
+    whose content is gone, so none of them may be reported as a survivor."""
+    from agent.context_compressor_tail import _lean_recovery_stub, surviving_skill_names
+
+    def call(cid, name):
+        return {"id": cid, "type": "function",
+                "function": {"name": "skill_view", "arguments": json.dumps({"name": name})}}
+
+    marker = "[SKILL_PRUNED: content lost in compression; reload with skill_view(name='delta')]"
+    msgs = [
+        {"role": "assistant", "content": "",
+         "tool_calls": [call("c1", "alpha"), call("c2", "beta"), call("c3", "gamma"), call("c4", "delta"),
+                        call("c5", "epsilon")]},
+        {"role": "tool", "tool_call_id": "c1", "content": "# alpha\n" + "b" * 2000},
+        {"role": "tool", "tool_call_id": "c2", "content": "[skill_view] beta FAILED (unknown skill)"},
+        {"role": "tool", "tool_call_id": "c3", "content": _lean_recovery_stub("skill_view", 5000, "sess")},
+        {"role": "tool", "tool_call_id": "c4", "content": marker},
+        {"role": "tool", "tool_call_id": "c5", "content": None},
+    ]
+    assert surviving_skill_names(msgs) == {"alpha"}
