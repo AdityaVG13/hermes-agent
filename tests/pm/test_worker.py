@@ -108,8 +108,14 @@ def test_currency_probe_preserves_union_and_candidate_inputs(client, tmp_path, m
         engine = importlib.import_module("pm.install")
         monkeypatch.setattr(engine, "venv_is_current", lambda **kw: pytest.fail("probe ran in caller"))
     def snapshot():
+        from pm.currency_memo import MEMO_NAME
+
         return {path.relative_to(tmp_path): (path.read_bytes() if path.is_file() else None)
-                for path in tmp_path.rglob("*")}
+                for path in tmp_path.rglob("*")
+                # The currency memo is a derived cache, not dependency state: a probe
+                # may refresh it (atomic replace) and anything may delete it. Recorded
+                # state itself must stay byte-identical, which this still asserts.
+                if path.name != MEMO_NAME}
 
     from pm.lock import Lockfile
     pins = Lockfile(paths.lockfile_path())

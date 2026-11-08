@@ -712,6 +712,44 @@ def _carried(package, recorded: list[str]) -> list[str]:
     return [extra for extra in _still_declared(package, recorded) if _extra_key(extra) not in refused]
 
 
+def _stamp_member_dirs(plugins: PluginInput | None, enabled: list[str]):
+    """``_member_inputs`` resolved to the exact dirs ``expected_stamp`` hashes."""
+    from pm.publication import candidate_members
+    from pm.workspace import build_member_dirs
+
+    if isinstance(plugins, Candidates):
+        return candidate_members(plugins.dirs)
+    if isinstance(plugins, Members):
+        return plugins.dirs
+    if plugins is None:
+        return build_member_dirs(enabled)
+    raise TypeError(f"{type(plugins).__name__} changes plugin state; only a sync may carry it")
+
+
+def _remember_currency(root: Path, *, extras, plugins, dirs, facts_paths, current: bool) -> None:
+    """Best-effort verdict memo so fresh processes skip the re-derivation.
+
+    See ``pm.currency_memo``: the memo only ever answers when stat-facts prove
+    no input the probe reads has changed; every failure here just means the
+    next probe recomputes as before.
+    """
+    try:
+        from pm import currency_memo
+        from pm.environments import selected_venv
+        from pm.plugin_inputs import encode
+        from pm.plugins_state import dependency_homes
+        from pm.workspace import member_sources
+
+        currency_memo.write(root, extras=list(extras or []), plugins_encoded=encode(plugins),
+                            facts_paths=facts_paths,
+                            member_sources={str(identity): str(source)
+                                            for identity, source in member_sources(dirs).items()},
+                            homes=[Path(home) for home in dependency_homes()],
+                            environment=selected_venv(root), current=current)
+    except Exception:
+        pass
+
+
 def venv_is_current(*, extras: list[str] | None = None, plugins: Members | Candidates | None = None,
                     project_root: Path | None = None) -> bool:
     """Probe the requested union without changing recorded dependency state."""
@@ -720,18 +758,28 @@ def venv_is_current(*, extras: list[str] | None = None, plugins: Members | Candi
 
     root = paths.repo_root() if project_root is None else Path(project_root).absolute()
     package = get_package("venv") if project_root is None else Venv(root)
-    fact = Facts(runtime_facts_path(root), strict=True).get("venv")
+    runtime_facts = runtime_facts_path(root)
+    fact = Facts(runtime_facts, strict=True).get("venv")
+    facts_paths = [runtime_facts]
     if fact is None:
-        fact = Facts(paths.facts_path(), strict=True).get("venv")
+        store_facts = paths.facts_path()
+        fact = Facts(store_facts, strict=True).get("venv")
+        facts_paths.append(store_facts)
     if fact is None:
+        _remember_currency(root, extras=extras, plugins=plugins, dirs=(), facts_paths=facts_paths,
+                           current=False)
         return False
     if (not isinstance(fact, dict) or not isinstance(fact.get("stamp"), str) or not fact["stamp"]
             or not isinstance(fact.get("extras"), list)
             or any(not isinstance(extra, str) for extra in fact["extras"])):
         raise ValueError("invalid recorded dependency state")
     enabled = sorted(set(_carried(package, fact["extras"])) | set(extras or []))
-    stamp = package.expected_stamp(enabled, **_member_inputs(plugins))
-    return _runtime_state_matches(fact, stamp, project_root=root)
+    dirs = _stamp_member_dirs(plugins, enabled)
+    stamp = package.expected_stamp(enabled, plugin_dirs=dirs)
+    current = _runtime_state_matches(fact, stamp, project_root=root)
+    _remember_currency(root, extras=extras, plugins=plugins, dirs=dirs, facts_paths=facts_paths,
+                       current=current)
+    return current
 
 
 def _feature_policy(extras: Optional[list[str]], *, repair: bool) -> tuple[list[str] | None, list[str] | None]:
