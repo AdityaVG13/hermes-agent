@@ -139,6 +139,18 @@ def cadence_gaps(calls: list[tuple[int, str, str]], anchors: list[int]) -> list[
     return gaps
 
 
+def _pre_window(
+    calls: list[tuple[int, str, str]], center: int, lookback: int
+) -> list[tuple[int, str, str]]:
+    """The last ``lookback`` calls before ``center`` — a call budget, not a row distance.
+
+    Row indices and call counts diverge in tool-heavy transcripts (a fold's own summary
+    row, multi-row turns, tool results). Measuring "the last 250 calls" as "calls in the
+    last 250 rows" silently shrinks the pre-fold set and undercounts every repeat.
+    """
+    return [c for c in calls if c[0] < center][-lookback:]
+
+
 def recovery_tax(
     calls: list[tuple[int, str, str]], anchors: list[int], *, window: int = 12, lookback: int = 250
 ) -> dict[str, Any]:
@@ -148,7 +160,7 @@ def recovery_tax(
     for index, anchor in enumerate(anchors):
         # A window never crosses the next fold: those calls belong to another epoch.
         stop = anchors[index + 1] if index + 1 < len(anchors) else None
-        before = [(k, t) for i, k, t in calls if anchor - lookback <= i < anchor and t]
+        before = [(k, t) for _, k, t in _pre_window(calls, anchor, lookback) if t]
         after = [(k, t) for i, k, t in calls
                  if i > anchor and (stop is None or i < stop)][:window]
         if not after:
@@ -206,7 +218,7 @@ def repeat_tax(
 
     def observe(center: int, bucket: dict[str, int], stop: int | None = None) -> None:
         # A window never crosses the next fold: calls after it belong to another epoch.
-        before = {k for i, _, k in calls if center - lookback <= i < center}
+        before = {k for _, _, k in _pre_window(calls, center, lookback)}
         after = [
             c for c in calls
             if c[0] > center and (stop is None or c[0] < stop)

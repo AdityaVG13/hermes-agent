@@ -93,6 +93,26 @@ def test_two_anchors_at_one_boundary_are_one_interval():
     assert gaps == [1]
 
 
+# ── lookback is measured in calls, not rows ────────────────────────────────────────────────
+
+
+def _filler(row_id):
+    return {"id": row_id, "role": "assistant", "content": "thinking", "tool_calls": None,
+            "_compressed_summary": 0}
+
+
+def test_lookback_counts_calls_not_transcript_rows():
+    # One call, then 300 rows with no calls, then the fold. A one-call lookback must still
+    # find the pre-fold call; measuring distance in row indices finds nothing.
+    rows = ([_call(0, "read_file", path="a.rs")]
+            + [_filler(i) for i in range(1, 301)]
+            + [_fold(301), _call(302, "read_file", path="a.rs")])
+    r = repeat_tax(session_calls_exact(rows), fold_anchors(rows), lookback=1)
+    assert r["post"]["repeats"] == 1
+    tax = recovery_tax(session_calls(rows), fold_anchors(rows), lookback=1)
+    assert tax["totals"]["reacquired"] == 1
+
+
 # ── recovery tax ────────────────────────────────────────────────────────────────────────────
 
 
