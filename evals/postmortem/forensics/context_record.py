@@ -41,6 +41,7 @@ DEFAULT_GOAL_CHARS = 400
 DEFAULT_TOKENS = 2000
 DEFAULT_CONSTRAINTS = 8
 CONSTRAINT_CHARS = 160
+NO_GOAL = "(none recorded)"
 
 
 def _tool_calls(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -166,6 +167,41 @@ def extract_constraints(rows: list[dict[str, Any]], *, chars: int = CONSTRAINT_C
 def record_constraints(rec: dict[str, Any]) -> list[str]:
     """The CONSTRAINTS a built record carries, for the next fold to inherit."""
     return [c for c in (rec.get("constraints") or []) if isinstance(c, str) and c]
+
+
+# A window often opens on an acknowledgement, a typo, or a bare question. Those are the
+# record's first ask (ask_pair) but they are not objectives, and rendering them as GOAL
+# tells the model to resume from a status ack. Measured fragments: "okay restarted",
+# "ues tat", "so what does all this mean?", "why though? what's the reason".
+_ACKS = {
+    "ok", "okay", "yes", "yeah", "yep", "no", "nope", "sure", "thanks", "done", "continue",
+    "go", "proceed", "restarted", "great", "perfect", "nice", "cool", "sounds good",
+    "do it", "go ahead", "okay restarted", "ok restarted",
+}
+_IMPERATIVE = re.compile(
+    r"\b(check|fix|build|run|make|add|remove|find|investigate|write|update|review|implement|"
+    r"figure|help|create|delete|move|rename|verify|test|debug|look|search|read|change|"
+    r"refactor|design|explain|show|tell|give|use|start|stop|set|install|publish|ship|"
+    r"rebuild|rewrite|audit|clean|simplify|split|trace|measure|compare|research|release)\b",
+    re.IGNORECASE,
+)
+_ASK_FRAME = re.compile(
+    r"\b(please|can you|could you|would you|i want|i need|we need|we should|let's|lets|"
+    r"i'd like|i would like|you need to|you should)\b",
+    re.IGNORECASE,
+)
+
+
+def goal_shaped(text: str) -> bool:
+    """True when the text is an instruction or a request, not an ack, typo, or bare question."""
+    flat = " ".join((text or "").split()).strip().rstrip(".!,")
+    if not flat or flat.lower() in _ACKS:
+        return False
+    if len(re.findall(r"[A-Za-z][A-Za-z'-]+", flat)) < 3:
+        return False
+    if flat.endswith("?") and not _ASK_FRAME.search(flat):
+        return False
+    return bool(_IMPERATIVE.search(flat) or _ASK_FRAME.search(flat))
 
 
 def _strip_attachment(text: str) -> str:
@@ -414,11 +450,12 @@ def build_record(
     plan, plan_more, plan_next = _plan(rows)
     first_ask, last_ask = ask_pair(rows, goal_chars=goal_chars)
     carried = ""
-    if carried_goal and carried_goal.strip() != "(none)":
+    if carried_goal and carried_goal.strip() not in ("(none)", NO_GOAL):
         carried = _clip(_strip_attachment(carried_goal), goal_chars)
     # GOAL is the standing objective: the carried one survives a pivot, else the window's first
-    # ask. The newest instruction is listed separately only when it is a different thing.
-    goal = carried or first_ask
+    # ask when it is objective-shaped. The newest instruction is listed separately only when it
+    # is a different thing.
+    goal = carried or (first_ask if goal_shaped(first_ask) else NO_GOAL)
     latest_ask = last_ask if last_ask and last_ask[:80] != goal[:80] else ""
     # A rule outlives the ask that stated it, so constraints are carried like GOAL instead of
     # being rebuilt from the window: the fold that follows usually contains no reminder.
@@ -473,6 +510,7 @@ def build_record(
 
     # Never derive NEXT from the last action: that instructs the model to redo it.
     next_step = (f"{plan_next['id']}. {plan_next['content']}" if plan_next
+                 else "ask the user — this window recorded no objective" if goal == NO_GOAL
                  else "no plan recorded — infer from GOAL")
 
     # The recovery line must be a call the model can actually make: session_search takes
@@ -484,7 +522,7 @@ def build_record(
         if last_row is not None:
             recovery += f"  # rows {first_row}-{last_row}"
     else:
-        if goal and goal != "(none)":
+        if goal and goal not in ("(none)", NO_GOAL):
             kwargs.append(f"query={_clip(goal, 60).replace(chr(34), chr(39))!r}")
         recovery = f"session_search({', '.join(kwargs)})" if kwargs else "session_search()"
 
