@@ -52,6 +52,15 @@ def test_one_line_per_batch_and_now_is_the_last():
     assert "NEXT:" in text
 
 
+def test_the_size_guard_sheds_handles_when_no_batches_remain():
+    rows = [_row("user", "go")]
+    calls = [_call(f"c{i}", "read_file", path="/very/long/" + "d" * 150 + f"/f{i}.py", limit=1)
+             for i in range(20)]
+    _batch(rows, "read", calls, [{"content_hash": "h" * 16} for _ in calls])
+    rec = build_record(rows, max_tokens=800)
+    assert len(rec["text"]) // 4 <= 800
+
+
 def test_recovery_pointer_names_real_session_search_parameters():
     rows = [_row("user", "fix the fold")]
     query_form = build_record(rows, session_id="local-x")["loss"]["recovery"]

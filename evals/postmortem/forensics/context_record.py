@@ -454,6 +454,12 @@ def build_record(
         rec["done"].pop(0)
         rec["done_dropped"] += 1
         rec["text"] = render_record(rec)
+    # With no completed batches left, shed the least load-bearing handles rather than claim
+    # a bound the record does not meet: queries, artifacts, oldest files, skills, commands.
+    for kind in ("q", "a", "f", "s", "c"):
+        while rec["handles"].get(kind) and len(rec["text"]) // 4 > max_tokens:
+            rec["handles"][kind].pop(0)
+            rec["text"] = render_record(rec)
     return rec
 
 
