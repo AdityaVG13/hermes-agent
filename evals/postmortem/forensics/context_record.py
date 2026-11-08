@@ -16,6 +16,7 @@ verbatim (the ask, the todos) or mechanically derived (tool name, args, outcome,
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 RECORD_HEADER = "== CONTEXT RECORD v1 =="
@@ -85,14 +86,17 @@ def bare_ref(value: str) -> str:
 
 
 def _carried_ref(line: str) -> str:
-    """`- path: read lines 3-9` -> `path#L3-9`; an edited line keeps the bare path."""
+    """`- path: read lines 3-9` -> `path#L3-9`; `- path: edited (1x)` -> `path (edited)`."""
     text = (line or "").strip()
-    if text.startswith("- "):
-        text = text.removeprefix("- ")
+    if not text.startswith("- "):
+        return ""  # a trailer like "(3 older files not listed)" is not a handle
+    text = text.removeprefix("- ")
     path, _, detail = text.partition(": ")
     if "read lines " in detail:
         span = detail.split("read lines ", 1)[1].split(";", 1)[0].strip()
         return f"{path}#L{span}"
+    if "edited" in detail:
+        return f"{path} (edited)"
     return path
 
 
@@ -166,9 +170,14 @@ def ask_pair(rows: list[dict[str, Any]], *, goal_chars: int = DEFAULT_GOAL_CHARS
     return asks[0], asks[-1]
 
 
+_REF_SUFFIX = re.compile(r":[0-9]+(?:-[0-9]+)?$")
+
+
 def _basename(path: str) -> str:
-    path = path.split("#", 1)[0].split(":", 1)[0]
-    return path.rsplit("/", 1)[-1] or path
+    """The file's own name: strip a line suffix ("a.py:12") and any "#L" span, but never a
+    Windows drive letter ("C:\\repo\\a.py" still yields "a.py")."""
+    path = _REF_SUFFIX.sub("", path.split("#", 1)[0])
+    return path.replace("\\", "/").rsplit("/", 1)[-1] or path
 
 
 def _target(call: dict[str, Any]) -> str:
@@ -200,7 +209,9 @@ def batches(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             calls = _tool_calls(row)
             if not calls:
                 continue
-            batch = {"text": (row.get("content") or "").strip(), "calls": [], "results": {}}
+            raw_text = row.get("content")
+            batch = {"text": raw_text.strip() if isinstance(raw_text, str) else "",
+                     "calls": [], "results": {}}
             out.append(batch)
             for call in calls:
                 cid = str(call.get("id") or "")
@@ -226,6 +237,14 @@ def _outcome(results: dict[str, dict[str, Any]]) -> str:
     return "ok"
 
 
+def _int(value: Any, default: int = 0) -> int:
+    """Model-supplied arguments are untrusted: a non-numeric offset must not break a fold."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _handle(call: dict[str, Any], results: dict[str, dict[str, Any]],
             cmd_chars: int = 80) -> tuple[str, str] | None:
     name = _name(call)
@@ -238,8 +257,8 @@ def _handle(call: dict[str, Any], results: dict[str, dict[str, Any]],
             return None
         if name != "read_file":
             return ("f", f"{path} (edited)")
-        start = int(args.get("offset") or 1)
-        limit = int(args.get("limit") or 0)
+        start = _int(args.get("offset") or 1, 1)
+        limit = _int(args.get("limit") or 0, 0)
         ref = path
         if limit:
             ref = f"{path}#L{start}-{start + limit - 1}"
@@ -299,7 +318,12 @@ def _done_line(index: int, batch: dict[str, Any], *, intent_chars: int = 110) ->
     return f"  {index}. {_clip(label, 150)} — {_outcome(batch.get('results') or {})}"
 
 
-def _plan(rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]], int]:
+def _plan(rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]], int, dict[str, str] | None]:
+    """(shown open items, hidden count, the item NEXT should name).
+
+    NEXT comes from the full open list, not the shown slice: an in-progress item beyond
+    the cap must still direct the next step.
+    """
     for row in reversed(rows):
         if row.get("role") != "tool" or row.get("tool_name") != "todo_list":
             continue
@@ -310,6 +334,15 @@ def _plan(rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]], int]:
                 if isinstance(t, dict) and str(t.get("status") or "") in ("pending", "in_progress")
             ]
             shown = open_items[:DEFAULT_PLAN_ITEMS]
+            active = next(
+                (t for t in open_items if str(t.get("status") or "") == "in_progress"),
+                open_items[0] if open_items else None,
+            )
+            nxt = (
+                {"id": str(active.get("id") or "?"),
+                 "content": _clip(str(active.get("content") or ""), 120)}
+                if active is not None else None
+            )
             return [
                 {
                     "id": str(t.get("id") or "?"),
@@ -317,8 +350,8 @@ def _plan(rows: list[dict[str, Any]]) -> tuple[list[dict[str, str]], int]:
                     "content": _clip(str(t.get("content") or ""), 120),
                 }
                 for t in shown
-            ], len(open_items) - len(shown)
-    return [], 0
+            ], len(open_items) - len(shown), nxt
+    return [], 0, None
 
 
 def build_record(
@@ -336,7 +369,7 @@ def build_record(
 ) -> dict[str, Any]:
     """Build the record for the rows being folded. Deterministic for identical input."""
     batches_ = batches(rows)
-    plan, plan_more = _plan(rows)
+    plan, plan_more, plan_next = _plan(rows)
     first_ask, last_ask = ask_pair(rows, goal_chars=goal_chars)
     carried = ""
     if carried_goal and carried_goal.strip() != "(none)":
@@ -370,42 +403,36 @@ def build_record(
     }
     if carried_lines:
         existing = {bare_ref(value) for value in handles.get("f", [])}
-        carried = []
+        carried_refs = []
         for line in carried_lines:
             ref = _carried_ref(line)
             bare = bare_ref(ref)
             if not bare or bare in existing:
                 continue
             existing.add(bare)
-            carried.append(ref)
-        handles["f"] = (carried + handles.get("f", []))[-caps["f"]:]
+            carried_refs.append(ref)
+        handles["f"] = (carried_refs + handles.get("f", []))[-caps["f"]:]
 
     results = sum(len(b.get("results") or {}) for b in batches_)
     chars = sum(len(str(b.get("text") or "")) for b in batches_)
     chars += sum(len(str(r.get("text") or "")) for b in batches_ for r in (b.get("results") or {}).values())
 
-    next_step = ""
-    for item in plan:
-        if item["status"] == "in_progress":
-            next_step = f"{item['id']}. {item['content']}"
-            break
-    if not next_step and plan:
-        next_step = f"{plan[0]['id']}. {plan[0]['content']}"
-    if not next_step:
-        # Never derive NEXT from the last action: that instructs the model to redo it.
-        next_step = "no plan recorded — infer from GOAL"
+    # Never derive NEXT from the last action: that instructs the model to redo it.
+    next_step = (f"{plan_next['id']}. {plan_next['content']}" if plan_next
+                 else "no plan recorded — infer from GOAL")
 
-    first = first_row if first_row is not None else 0
-    last = last_row if last_row is not None else len(rows)
+    # The recovery line must be a call the model can actually make: session_search takes
+    # ``session_id`` and ``around_message_id`` (or ``query``), never ``session``/``around``.
+    kwargs = [f"session_id={session_id}"] if session_id else []
     if first_row is not None:
-        recovery = (
-            f"session_search(session={session_id or '?'}, around={first})"
-            f"  # rows {first}-{last}"
-        )
+        kwargs.append(f"around_message_id={first_row}")
+        recovery = f"session_search({', '.join(kwargs)})"
+        if last_row is not None:
+            recovery += f"  # rows {first_row}-{last_row}"
     else:
-        query = _clip(goal, 60).replace(chr(34), chr(39))
-        where = f"session={session_id}, " if session_id else ""
-        recovery = f"session_search({where}query={query!r})"
+        if goal and goal != "(none)":
+            kwargs.append(f"query={_clip(goal, 60).replace(chr(34), chr(39))!r}")
+        recovery = f"session_search({', '.join(kwargs)})" if kwargs else "session_search()"
 
     rec: dict[str, Any] = {
         "version": 1,

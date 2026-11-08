@@ -1,4 +1,4 @@
-"""Context Record prototype: shape, determinism, and the fields a fold must carry."""
+"""Context Record: shape, determinism, and the fields a fold must carry."""
 import json
 
 from evals.postmortem.forensics.context_record import build_record, last_goal, render_record
@@ -50,6 +50,49 @@ def test_one_line_per_batch_and_now_is_the_last():
     assert "LAST FOLDED (done): run the lane" in text and "— ok" in text
     assert "evals/x.py#L10-39 (hash abc123)" in text
     assert "NEXT:" in text
+
+
+def test_recovery_pointer_names_real_session_search_parameters():
+    rows = [_row("user", "fix the fold")]
+    query_form = build_record(rows, session_id="local-x")["loss"]["recovery"]
+    assert "session_id=local-x" in query_form and "query=" in query_form
+    assert "session=" not in query_form.replace("session_id=", "")
+    row_form = build_record(rows, session_id="local-x", first_row=42, last_row=50)["loss"]["recovery"]
+    assert "session_id=local-x" in row_form and "around_message_id=42" in row_form
+    assert "around=" not in row_form
+
+
+def test_record_is_byte_stable_for_the_same_rows():
+    rows = [_row("user", "do it")]
+    _batch(rows, "read", [_call("c1", "read_file", path="a.py", limit=5)], [{"content_hash": "h"}])
+    assert build_record(rows)["text"] == build_record(rows)["text"]
+
+
+def test_windows_drive_letter_is_not_a_line_suffix():
+    from evals.postmortem.forensics.context_record import _basename
+    assert _basename(r"C:\repo\a.py") == "a.py"
+    assert _basename("src/a.py:12") == "a.py"
+    assert _basename("src/a.py#L1-5") == "a.py"
+
+
+def test_a_carried_edit_keeps_its_marker():
+    rows = [_row("user", "go")]
+    _batch(rows, "run", [_call("c1", "terminal", command="ls")], [{"output": "ok"}])
+    rec = build_record(rows, carried_lines=["- /a.py: edited (1x)"])
+    assert "/a.py (edited)" in rec["text"]
+
+
+def test_older_files_trailer_is_not_a_file_handle():
+    rows = [_row("user", "go")]
+    _batch(rows, "run", [_call("c1", "terminal", command="ls")], [{"output": "ok"}])
+    rec = build_record(rows, carried_lines=["- /a.py: read lines 1-5", "(3 older files not listed)"])
+    assert "(3 older files not listed)" not in rec["text"]
+
+
+def test_non_numeric_read_arguments_do_not_break_the_fold():
+    rows = [_row("user", "go")]
+    _batch(rows, "read", [_call("c1", "read_file", path="a.py", offset="all", limit="many")], [{}])
+    assert "a.py" in build_record(rows)["text"]
 
 
 def test_failed_result_is_marked_err():
