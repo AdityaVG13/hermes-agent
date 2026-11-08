@@ -141,18 +141,13 @@ CONSTRAINT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# The host marks its own injected user turns with ``display_kind``. The record used to drop
-# that column before extraction, so a delegation's report and a process notice were mined as
-# if the user had spoken them: measured on state.db (2026-11-06), 2,632 non-human user rows
-# and most of the channel's false positives came from there.
-NON_HUMAN_KINDS = frozenset({
-    "internal_notification",
-    "async_delegation_complete",
-    "process_complete",
-    "hidden",
-    "auto_continue",
-    "model_switch",
-})
+# The host marks its own injected user turns with ``display_kind``, and ``optchat_ingestion``
+# already refuses anything that is not the user's own voice. The record used to drop the column
+# before extraction, so a delegation's report and a process notice were mined as if the user had
+# spoken them: measured on state.db (2026-11-06), 2,615 non-human user rows plus 17 summary
+# carriers, and most of the channel's false positives came from there. This is an allow-list,
+# not a deny-list: a kind this build has never seen is host-authored until proven otherwise.
+HUMAN_KINDS = frozenset({"", "steer"})
 
 _HEADING = re.compile(r"(?m)^#{1,4} ")
 _BOLD_BULLET = re.compile(r"(?m)^\s*[-*]\s+\*\*")
@@ -171,7 +166,7 @@ def is_document(text: str) -> bool:
 def is_human_row(row: dict[str, Any]) -> bool:
     """True when the host says this user turn came from the user, not from its own injectors."""
     kind = row.get("display_kind") or ""
-    return not (kind in NON_HUMAN_KINDS)
+    return kind in HUMAN_KINDS
 
 
 # A standing rule is short and it addresses the work. "The cache is invalid without a
