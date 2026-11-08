@@ -561,6 +561,7 @@ def render_record(rec: dict[str, Any]) -> str:
     lines = [
         RECORD_HEADER,
         "Completed work below. Do not repeat it. Resume from NEXT.",
+        "The user's own messages outrank this record: re-read the newest user message before acting.",
         "",
         f"GOAL: {rec['goal']}",
     ]
