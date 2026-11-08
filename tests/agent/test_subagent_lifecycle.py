@@ -323,6 +323,16 @@ def test_routing_delegation_provider_bundle(routing_lifecycle):
     assert build.call_args.kwargs["model"] == "request-model"
 
 
+def test_routing_delegation_config_caps_child_iterations(routing_lifecycle):
+    service, build, config, _resolve = routing_lifecycle
+    config.return_value = {
+        "provider": "openrouter", "model": "delegated-model", "max_iterations": 777,
+    }
+    handle = service.launch(SubagentLaunchRequest(goal="route"))
+    assert service.wait(handle, timeout_seconds=2).state is SubagentState.SUCCEEDED
+    assert build.call_args.kwargs["max_iterations"] == 777
+
+
 @pytest.mark.parametrize("wire", [False, True])
 def test_routing_request_provider_wins_without_mixing_bundles(routing_lifecycle, wire):
     from hermes_cli.plugin_host_wire import decode, encode

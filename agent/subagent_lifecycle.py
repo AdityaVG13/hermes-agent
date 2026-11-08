@@ -313,7 +313,10 @@ class SubagentLifecycleService:
             DEFAULT_MAX_ITERATIONS,
         )
         # Routing precedence: request.provider > delegation config > parent.
-        routing_cfg = {"provider": request.provider, "model": request.model or ""} if request.provider is not None else _load_config()
+        # One config read serves both routing precedence and the child's iteration
+        # cap, mirroring delegate_tool: config max_iterations is authoritative.
+        delegation_cfg = _load_config()
+        routing_cfg = {"provider": request.provider, "model": request.model or ""} if request.provider is not None else delegation_cfg
         try:
             creds = _resolve_delegation_credentials(routing_cfg, parent)
         except ValueError as exc:
@@ -321,7 +324,7 @@ class SubagentLifecycleService:
         child = _build_child_preserving_parent_tools(
             task_index=0, goal=request.goal, context=request.context,
             toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
-            model=request.model or creds["model"], max_iterations=DEFAULT_MAX_ITERATIONS,
+            model=request.model or creds["model"], max_iterations=delegation_cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS),
             task_count=1, parent_agent=parent, role=request.role, **_credential_overrides(creds, routing_cfg),
         )
         subagent_id = str(getattr(child, "_subagent_id", "") or "")
