@@ -151,7 +151,9 @@ def test_non_string_content_does_not_crash_the_fold():
     rows = [{"role": "user", "content": [{"type": "text", "text": "hi"}], "tool_calls": None,
              "tool_call_id": "", "tool_name": "", "_compressed_summary": False}]
     rec = build_record(rows)
-    assert rec["goal"] == "(none)"
+    # The sentinel is the canonical plugin's (record.py NO_GOAL), not a free-form string; the fold
+    # must not crash on list-shaped content and must report the same "no objective" marker.
+    assert rec["goal"] == "(none recorded)"
 
 
 def test_deterministic_and_bounded():
